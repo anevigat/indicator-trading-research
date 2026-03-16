@@ -82,7 +82,7 @@ python scripts/audit_data_layout.py \
 
 ## Timeframe build
 
-The timeframe builder prefers cleaned tick parquet when available, then falls back to the lowest reliable bar timeframe already present in the source tree. It currently reads parquet input and writes deterministic Parquet outputs.
+The timeframe builder prefers cleaned tick parquet when available, then falls back to the lowest reliable bar timeframe already present in the source tree. It reads parquet input and writes deterministic Parquet outputs.
 
 ```bash
 source .venv/bin/activate
@@ -102,7 +102,88 @@ python scripts/build_timeframes.py \
   --end-date 2025-01-31
 ```
 
-For large multi-year tick histories, run the builder pair-by-pair or with date bounds first. The Phase 1 validation run used a bounded smoke build for `EURUSD` and `GBPUSD` before attempting any broader rebuild.
+## Memory-Efficient Local Timeframe Builds
+
+The builder was refactored for laptop-friendly execution because the earlier version materialized entire pair histories in pandas before resampling. The current implementation streams parquet fragments in bounded batches, keeps only a small carry-over buffer per timeframe, and writes final parquet outputs incrementally.
+
+Recommended local pattern:
+
+- build one pair at a time
+- keep `--pair-workers 1` unless you have headroom
+- start with a bounded date window
+- use `--skip-existing` to resume safely
+- use `--validate-only` after a build or before relying on existing outputs
+
+Safest first command:
+
+```bash
+source .venv/bin/activate
+python scripts/build_timeframes.py \
+  --input-root ~/FX/eurusd-quant/eurusd_quant/data \
+  --output-root data/processed \
+  --pairs EURUSD \
+  --timeframes 1m 5m \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-07 \
+  --batch-size 100000 \
+  --pair-workers 1 \
+  --overwrite \
+  --sample-validate
+```
+
+Build one pair at a time:
+
+```bash
+python scripts/build_timeframes.py \
+  --input-root ~/FX/eurusd-quant/eurusd_quant/data \
+  --output-root data/processed \
+  --pairs GBPUSD \
+  --timeframes 1m 15m 1h \
+  --start-date 2025-01-01 \
+  --end-date 2025-03-31 \
+  --batch-size 100000 \
+  --pair-workers 1 \
+  --overwrite
+```
+
+Resume safely:
+
+```bash
+python scripts/build_timeframes.py \
+  --input-root ~/FX/eurusd-quant/eurusd_quant/data \
+  --output-root data/processed \
+  --pairs EURUSD \
+  --timeframes 1m 5m \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-07 \
+  --batch-size 100000 \
+  --pair-workers 1 \
+  --skip-existing \
+  --sample-validate
+```
+
+Validate outputs only:
+
+```bash
+python scripts/build_timeframes.py \
+  --input-root ~/FX/eurusd-quant/eurusd_quant/data \
+  --output-root data/processed \
+  --pairs EURUSD \
+  --timeframes 1m 5m \
+  --validate-only
+```
+
+Aggressive parallelism is discouraged on laptops. The builder supports `--pair-workers`, but the safe default is sequential pair-by-pair execution.
+
+The local wrapper script provides ready-to-run examples:
+
+```bash
+scripts/build_timeframes_local.sh single-pair EURUSD
+scripts/build_timeframes_local.sh single-year GBPUSD 2025
+scripts/build_timeframes_local.sh all-sequential
+scripts/build_timeframes_local.sh validate EURUSD 1m 5m
+scripts/build_timeframes_local.sh resume EURUSD
+```
 
 ## Notes
 
