@@ -25,9 +25,9 @@ class BacktestConfig:
     allow_short: bool = True
     one_position_at_a_time: bool = True
     stop_loss_mode: str | None = None
-    stop_loss_value: float | None = None
+    stop_loss: float | None = None
     take_profit_mode: str | None = None
-    take_profit_value: float | None = None
+    take_profit: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,4 +72,3 @@ class BacktestResult:
     equity_curve: pd.DataFrame | None = None
     signals: pd.DataFrame | None = None
     candles: pd.DataFrame | None = None
-

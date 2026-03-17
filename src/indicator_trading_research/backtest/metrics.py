@@ -28,6 +28,10 @@ def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, i
             "average_trade_duration_bars": 0.0,
             "long_trades_count": 0,
             "short_trades_count": 0,
+            "stop_loss_exits": 0,
+            "take_profit_exits": 0,
+            "signal_exits": 0,
+            "forced_end_exits": 0,
         }
 
     gross_pnl = float(trades["gross_pnl"].fillna(0.0).sum()) if "gross_pnl" in trades.columns else float(trades["pnl"].fillna(0.0).sum())
@@ -67,5 +71,8 @@ def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, i
         "average_trade_duration_bars": duration,
         "long_trades_count": int((trades["side"] == "long").sum()),
         "short_trades_count": int((trades["side"] == "short").sum()),
+        "stop_loss_exits": int((trades["exit_reason"] == "stop_loss").sum()) if "exit_reason" in trades.columns else 0,
+        "take_profit_exits": int((trades["exit_reason"] == "take_profit").sum()) if "exit_reason" in trades.columns else 0,
+        "signal_exits": int((trades["exit_reason"] == "signal_exit").sum()) if "exit_reason" in trades.columns else 0,
+        "forced_end_exits": int((trades["exit_reason"] == "forced_end").sum()) if "exit_reason" in trades.columns else 0,
     }
-

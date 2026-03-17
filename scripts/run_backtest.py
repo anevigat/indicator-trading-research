@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-position-size", type=float, required=True, help="Fixed position size.")
     parser.add_argument("--spread", type=float, default=0.0, help="Absolute spread in price units.")
     parser.add_argument("--slippage", type=float, default=0.0, help="Absolute slippage in price units.")
+    parser.add_argument("--stop-loss", type=float, default=None, help="Absolute stop-loss distance from adjusted entry price.")
+    parser.add_argument("--take-profit", type=float, default=None, help="Absolute take-profit distance from adjusted entry price.")
+    parser.add_argument("--stop-loss-mode", choices=["absolute"], default=None, help="Stop-loss mode. Only 'absolute' is supported in v1.")
+    parser.add_argument("--take-profit-mode", choices=["absolute"], default=None, help="Take-profit mode. Only 'absolute' is supported in v1.")
     parser.add_argument("--output-root", required=True, help="Root directory for saved backtest outputs.")
     parser.add_argument("--fee-per-trade", type=float, default=0.0, help="Flat fee applied per completed trade.")
     parser.add_argument("--allow-long", dest="allow_long", action="store_true", help="Allow long trades.")
@@ -84,6 +88,10 @@ def main() -> None:
             fee_per_trade=args.fee_per_trade,
             allow_long=args.allow_long,
             allow_short=args.allow_short,
+            stop_loss_mode=args.stop_loss_mode if args.stop_loss is not None else None,
+            stop_loss=args.stop_loss,
+            take_profit_mode=args.take_profit_mode if args.take_profit is not None else None,
+            take_profit=args.take_profit,
         )
         result = run_backtest(candles, signals, config)
         output_path = save_backtest_result(result, args.output_root)
@@ -98,10 +106,11 @@ def main() -> None:
         f"net_pnl={metrics['net_pnl']:.6f} "
         f"profit_factor={metrics['profit_factor']} "
         f"max_drawdown={metrics['max_drawdown']:.6f} "
+        f"stop_loss={config.stop_loss} "
+        f"take_profit={config.take_profit} "
         f"output={output_path}"
     )
 
 
 if __name__ == "__main__":
     main()
-
