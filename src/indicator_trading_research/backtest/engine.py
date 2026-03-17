@@ -1,4 +1,16 @@
-"""Minimal deterministic backtest engine."""
+"""Minimal deterministic backtest engine.
+
+Execution rules are intentionally explicit:
+
+- signals are generated from bar-close information only
+- entry and opposite-signal exits happen on the next bar open
+- a same-open flip is allowed: an opposite signal closes the current trade and can
+  open the new trade on that same next bar open
+- stop-loss and take-profit thresholds are derived from the adjusted entry price
+- if both stop-loss and take-profit are touched within the same bar, the engine
+  assumes stop-loss triggers first
+- an open trade at the end of the data is forced flat on the final bar close
+"""
 
 from __future__ import annotations
 
@@ -8,6 +20,8 @@ import pandas as pd
 
 from .contracts import BacktestConfig, BacktestResult, TradeRecord
 from .metrics import compute_backtest_metrics
+
+SUPPORTED_PROTECTION_MODES = {"absolute"}
 
 
 @dataclass
@@ -30,7 +44,41 @@ def _execution_price(side: str, base_price: float, *, spread: float, slippage: f
     return base_price - half_spread - slippage if is_entry else base_price + half_spread + slippage
 
 
-def _resolve_exit_from_bar(position: OpenPosition, bar: pd.Series, config: BacktestConfig) -> tuple[float, str] | None:
+def _normalize_protection_mode(name: str, mode: str | None, value: float | None) -> str | None:
+    if value is None:
+        if mode is not None:
+            raise ValueError(f"{name}_mode requires {name} to be set.")
+        return None
+
+    if value <= 0:
+        raise ValueError(f"{name} must be positive when provided.")
+
+    normalized_mode = (mode or "absolute").strip().lower()
+    if normalized_mode not in SUPPORTED_PROTECTION_MODES:
+        supported = ", ".join(sorted(SUPPORTED_PROTECTION_MODES))
+        raise ValueError(f"Unsupported {name}_mode: {mode!r}. Supported modes: {supported}.")
+    return normalized_mode
+
+
+def _validate_config(config: BacktestConfig) -> None:
+    if config.fixed_position_size <= 0:
+        raise ValueError("fixed_position_size must be positive.")
+    if config.spread < 0:
+        raise ValueError("spread must be zero or positive.")
+    if config.slippage < 0:
+        raise ValueError("slippage must be zero or positive.")
+    if config.fee_per_trade < 0:
+        raise ValueError("fee_per_trade must be zero or positive.")
+    if not config.allow_long and not config.allow_short:
+        raise ValueError("At least one of allow_long or allow_short must be enabled.")
+    if not config.one_position_at_a_time:
+        raise NotImplementedError("V1 engine supports one_position_at_a_time=True only.")
+
+    config.stop_loss_mode = _normalize_protection_mode("stop_loss", config.stop_loss_mode, config.stop_loss)
+    config.take_profit_mode = _normalize_protection_mode("take_profit", config.take_profit_mode, config.take_profit)
+
+
+def _resolve_exit_from_bar(position: OpenPosition, bar: pd.Series) -> tuple[float, str] | None:
     if position.stop_loss is None and position.take_profit is None:
         return None
 
@@ -67,17 +115,11 @@ def _build_stop_take_profit(entry_price: float, side: str, config: BacktestConfi
     stop_loss = None
     take_profit = None
 
-    if config.stop_loss_mode == "price_offset" and config.stop_loss_value is not None:
-        stop_loss = entry_price - config.stop_loss_value if side == "long" else entry_price + config.stop_loss_value
-    elif config.stop_loss_mode == "percent" and config.stop_loss_value is not None:
-        pct = config.stop_loss_value
-        stop_loss = entry_price * (1 - pct) if side == "long" else entry_price * (1 + pct)
+    if config.stop_loss_mode == "absolute" and config.stop_loss is not None:
+        stop_loss = entry_price - config.stop_loss if side == "long" else entry_price + config.stop_loss
 
-    if config.take_profit_mode == "price_offset" and config.take_profit_value is not None:
-        take_profit = entry_price + config.take_profit_value if side == "long" else entry_price - config.take_profit_value
-    elif config.take_profit_mode == "percent" and config.take_profit_value is not None:
-        pct = config.take_profit_value
-        take_profit = entry_price * (1 + pct) if side == "long" else entry_price * (1 - pct)
+    if config.take_profit_mode == "absolute" and config.take_profit is not None:
+        take_profit = entry_price + config.take_profit if side == "long" else entry_price - config.take_profit
 
     return stop_loss, take_profit
 
@@ -113,10 +155,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
         raise ValueError("Cannot backtest an empty candle dataframe.")
     if len(candles) < 2:
         raise ValueError("Need at least two bars for next-bar execution.")
-    if config.fixed_position_size <= 0:
-        raise ValueError("fixed_position_size must be positive.")
-    if not config.one_position_at_a_time:
-        raise NotImplementedError("V1 engine supports one_position_at_a_time=True only.")
+    _validate_config(config)
 
     signal_frame = signals.copy()
     signal_frame["timestamp"] = pd.to_datetime(signal_frame["timestamp"], utc=True)
@@ -145,7 +184,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             wants_opposite = (position.side == "long" and signal_value < 0) or (position.side == "short" and signal_value > 0)
             if wants_opposite:
                 exit_price = _execution_price(position.side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=False)
-                trade = _finalize_trade(position, current_time, exit_price, "opposite_signal", config, index)
+                trade = _finalize_trade(position, current_time, exit_price, "signal_exit", config, index)
                 trades.append(trade)
                 realized_equity += float(trade.net_pnl or 0.0)
                 position = None
@@ -170,7 +209,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             )
 
         if position is not None:
-            intrabar_exit = _resolve_exit_from_bar(position, current_bar, config)
+            intrabar_exit = _resolve_exit_from_bar(position, current_bar)
             if intrabar_exit is not None:
                 raw_exit_price, exit_reason = intrabar_exit
                 adjusted_exit = _execution_price(position.side, raw_exit_price, spread=config.spread, slippage=config.slippage, is_entry=False)
@@ -196,9 +235,17 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
     if position is not None:
         last_bar = candles.iloc[-1]
         exit_price = _execution_price(position.side, float(last_bar["close"]), spread=config.spread, slippage=config.slippage, is_entry=False)
-        trade = _finalize_trade(position, pd.Timestamp(last_bar["timestamp"]), exit_price, "end_of_data", config, len(candles) - 1)
+        final_timestamp = pd.Timestamp(last_bar["timestamp"])
+        trade = _finalize_trade(position, final_timestamp, exit_price, "forced_end", config, len(candles) - 1)
         trades.append(trade)
         realized_equity += float(trade.net_pnl or 0.0)
+        if equity_rows:
+            equity_rows[-1] = {
+                "timestamp": final_timestamp,
+                "equity": realized_equity,
+                "realized_equity": realized_equity,
+                "position_side": "flat",
+            }
 
     trades_frame = pd.DataFrame([trade.to_dict() for trade in trades])
     if trades_frame.empty:

@@ -287,8 +287,9 @@ Execution assumptions:
 - the engine executes on the next bar to avoid lookahead
 - only one open position is supported at a time in v1
 - long and short entries use the next bar open adjusted by configured spread and slippage
-- opposite signals exit on the next bar open
-- stop-loss / take-profit hooks exist in the config contract and use a conservative same-bar rule when both would be hit
+- opposite signals exit on the next bar open and can flip into the new direction on that same open
+- stop-loss and take-profit use the `absolute` mode in v1, meaning absolute price distance from the adjusted entry price
+- if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
 
 Outputs are saved to:
 
@@ -320,6 +321,31 @@ python scripts/run_backtest.py \
   --slippage 0.00002 \
   --output-root outputs/backtests
 ```
+
+Run the same backtest with explicit stop-loss and take-profit controls:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 0.0020 \
+  --take-profit 0.0040 \
+  --stop-loss-mode absolute \
+  --take-profit-mode absolute \
+  --output-root outputs/backtests
+```
+
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `take_profit`, and `forced_end`, and stays compatible with the existing candle overlay CLI.
 
 Visualize the resulting trades on candles:
 
