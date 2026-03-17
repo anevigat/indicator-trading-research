@@ -185,6 +185,46 @@ scripts/build_timeframes_local.sh validate EURUSD 1m 5m
 scripts/build_timeframes_local.sh resume EURUSD
 ```
 
+## Visual Validation Of Processed Candles
+
+This exists so we can visually confirm that generated candles look correct across timeframes before we build more strategy logic on top of them. The plotting layer is intentionally lightweight and local-first, and the same framework is structured to accept future trade, stop, take-profit, and indicator overlays.
+
+Generate a single chart:
+
+```bash
+source .venv/bin/activate
+python scripts/plot_candles.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-05 \
+  --sma 20 50 \
+  --ema 9 21 \
+  --output outputs/charts/eurusd_15m.html
+```
+
+Compare multiple timeframes for the same window:
+
+```bash
+python scripts/compare_timeframes.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframes 15m 1h 4h \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-21 \
+  --sma 20 \
+  --output-dir outputs/charts/eurusd_compare
+```
+
+Safeguards:
+
+- both plotting CLIs validate `timestamp`, `open`, `high`, `low`, and `close` before plotting
+- warnings are surfaced for unsorted timestamps, duplicate timestamps, and missing OHLC values
+- `--max-bars` defaults to a safe chart size and will fail unless `--truncate` is explicitly set
+
+Future trade overlays will plug into the same `indicator_trading_research.visualization` package rather than requiring a redesign later.
+
 ## Notes
 
 - The audit note at `docs/research/phase1_bootstrap_and_data_audit.md` is generated from the reusable audit script.
