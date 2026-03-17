@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import pyarrow.dataset as ds
 
 from .overlays import add_moving_average_traces
-from .trades import add_trade_overlays
+from .trades import TradeOverlayOptions, add_trade_overlays
 
 REQUIRED_COLUMNS = ("timestamp", "open", "high", "low", "close")
 OPTIONAL_COLUMNS = ("pair", "timeframe", "spread", "tick_count", "volume", "source_kind", "source_timeframe")
@@ -167,6 +167,7 @@ def create_candlestick_figure(
     sma_windows: list[int] | None = None,
     ema_windows: list[int] | None = None,
     trades: pd.DataFrame | None = None,
+    trade_options: TradeOverlayOptions | None = None,
 ) -> go.Figure:
     chart_title = title or f"{pair.upper()} {timeframe.lower()} candles"
     figure = go.Figure()
@@ -181,7 +182,12 @@ def create_candlestick_figure(
         )
     )
     add_moving_average_traces(figure, frame, sma_windows=sma_windows or [], ema_windows=ema_windows or [])
-    add_trade_overlays(figure, trades=trades)
+    add_trade_overlays(
+        figure,
+        trades=trades,
+        options=trade_options,
+        chart_end=frame["timestamp"].max(),
+    )
     figure.update_layout(
         title=chart_title,
         template="plotly_white",
@@ -208,6 +214,11 @@ def save_figure_png(figure: go.Figure, output_path: str | Path) -> Path:
     return destination
 
 
-def format_warnings(warnings: list[PlotWarning]) -> list[dict[str, object]]:
-    return [warning.to_dict() for warning in warnings]
-
+def format_warnings(warnings: list[object]) -> list[dict[str, object]]:
+    formatted = []
+    for warning in warnings:
+        if hasattr(warning, "to_dict"):
+            formatted.append(warning.to_dict())
+        elif isinstance(warning, dict):
+            formatted.append(warning)
+    return formatted
