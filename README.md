@@ -272,6 +272,71 @@ Known limitations:
 - the overlay layer is for chart review, not backtest accounting
 - open trades render as entry-only unless exit data is present
 
+## Phase 2 Minimal Backtesting Framework
+
+What exists now:
+
+- minimal reusable backtest contracts under `indicator_trading_research.backtest`
+- one reusable strategy interface under `indicator_trading_research.strategies`
+- one reference strategy: `sma_crossover`
+- standardized backtest outputs that can be visualized with the existing candle overlay tooling
+
+Execution assumptions:
+
+- strategies generate signals using information available up to the signal bar close
+- the engine executes on the next bar to avoid lookahead
+- only one open position is supported at a time in v1
+- long and short entries use the next bar open adjusted by configured spread and slippage
+- opposite signals exit on the next bar open
+- stop-loss / take-profit hooks exist in the config contract and use a conservative same-bar rule when both would be hit
+
+Outputs are saved to:
+
+`outputs/backtests/<strategy_name>/<pair>/<timeframe>/<run_id>/`
+
+Each run folder contains:
+
+- `config.json`
+- `metrics.json`
+- `trades.parquet`
+- `signals.parquet`
+- `equity_curve.parquet`
+
+Run a bounded SMA crossover backtest:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --output-root outputs/backtests
+```
+
+Visualize the resulting trades on candles:
+
+```bash
+python scripts/plot_candles.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --trades-file outputs/backtests/sma_crossover/EURUSD/15m/<run_id>/trades.parquet \
+  --show-entries \
+  --show-exits \
+  --show-trade-lines \
+  --output outputs/charts/eurusd_15m_sma_backtest.html
+```
+
 ## Notes
 
 - The audit note at `docs/research/phase1_bootstrap_and_data_audit.md` is generated from the reusable audit script.
