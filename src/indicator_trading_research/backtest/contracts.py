@@ -28,6 +28,8 @@ class BacktestConfig:
     stop_loss: float | None = None
     take_profit_mode: str | None = None
     take_profit: float | None = None
+    atr_period: int = 14
+    atr_method: str = "wilder"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,6 +52,7 @@ class TradeRecord:
     outcome: str | None = None
     strategy_name: str | None = None
     notes: str | None = None
+    atr_at_entry: float | None = None
     exit_reason: str | None = None
     duration_bars: int | None = None
     gross_pnl: float | None = None

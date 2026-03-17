@@ -35,10 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-position-size", type=float, required=True, help="Fixed position size.")
     parser.add_argument("--spread", type=float, default=0.0, help="Absolute spread in price units.")
     parser.add_argument("--slippage", type=float, default=0.0, help="Absolute slippage in price units.")
-    parser.add_argument("--stop-loss", type=float, default=None, help="Absolute stop-loss distance from adjusted entry price.")
-    parser.add_argument("--take-profit", type=float, default=None, help="Absolute take-profit distance from adjusted entry price.")
-    parser.add_argument("--stop-loss-mode", choices=["absolute"], default=None, help="Stop-loss mode. Only 'absolute' is supported in v1.")
-    parser.add_argument("--take-profit-mode", choices=["absolute"], default=None, help="Take-profit mode. Only 'absolute' is supported in v1.")
+    parser.add_argument("--stop-loss", type=float, default=None, help="Stop-loss distance or ATR multiple, depending on stop-loss mode.")
+    parser.add_argument("--take-profit", type=float, default=None, help="Take-profit distance or ATR multiple, depending on take-profit mode.")
+    parser.add_argument("--stop-loss-mode", choices=["absolute", "atr"], default=None, help="Stop-loss mode.")
+    parser.add_argument("--take-profit-mode", choices=["absolute", "atr"], default=None, help="Take-profit mode.")
+    parser.add_argument("--atr-period", type=int, default=14, help="ATR period used when any protection mode is 'atr'.")
+    parser.add_argument("--atr-method", choices=["wilder", "sma", "ema"], default="wilder", help="ATR smoothing method.")
     parser.add_argument("--output-root", required=True, help="Root directory for saved backtest outputs.")
     parser.add_argument("--fee-per-trade", type=float, default=0.0, help="Flat fee applied per completed trade.")
     parser.add_argument("--allow-long", dest="allow_long", action="store_true", help="Allow long trades.")
@@ -92,6 +94,8 @@ def main() -> None:
             stop_loss=args.stop_loss,
             take_profit_mode=args.take_profit_mode if args.take_profit is not None else None,
             take_profit=args.take_profit,
+            atr_period=args.atr_period,
+            atr_method=args.atr_method,
         )
         result = run_backtest(candles, signals, config)
         output_path = save_backtest_result(result, args.output_root)
@@ -108,6 +112,10 @@ def main() -> None:
         f"max_drawdown={metrics['max_drawdown']:.6f} "
         f"stop_loss={config.stop_loss} "
         f"take_profit={config.take_profit} "
+        f"stop_loss_mode={config.stop_loss_mode} "
+        f"take_profit_mode={config.take_profit_mode} "
+        f"atr_period={config.atr_period if config.stop_loss_mode == 'atr' or config.take_profit_mode == 'atr' else 'n/a'} "
+        f"atr_method={config.atr_method if config.stop_loss_mode == 'atr' or config.take_profit_mode == 'atr' else 'n/a'} "
         f"output={output_path}"
     )
 
