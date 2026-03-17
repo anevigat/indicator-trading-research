@@ -107,6 +107,7 @@ def main() -> None:
     print(
         "Backtest summary: "
         f"trades={metrics['total_trades']} "
+        f"win_rate={metrics['win_rate']:.2%} "
         f"net_pnl={metrics['net_pnl']:.6f} "
         f"profit_factor={metrics['profit_factor']} "
         f"max_drawdown={metrics['max_drawdown']:.6f} "
