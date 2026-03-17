@@ -25,10 +25,16 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - long exits sell at `exit_price - spread/2 - slippage`
 - short entries sell at `next_open - spread/2 - slippage`
 - short exits buy at `exit_price + spread/2 + slippage`
-- stop-loss and take-profit use one v1 mode only: `absolute`, which means an absolute price distance from the adjusted entry price
+- stop-loss and take-profit support two modes: `absolute` and `atr`
+- `absolute` means a fixed price distance from the adjusted entry price
+- `atr` means a multiple of ATR from the signal bar close, then frozen at entry for the life of the trade
+- ATR uses standard true range: `max(high-low, abs(high-prev_close), abs(low-prev_close))`
+- supported ATR smoothing methods are `wilder`, `sma`, and `ema`
 - for a long trade, `stop_loss` is placed below entry and `take_profit` is placed above entry
 - for a short trade, `stop_loss` is placed above entry and `take_profit` is placed below entry
+- mixed modes are supported, for example ATR stop with absolute target or absolute stop with ATR target
 - intrabar stop-loss and take-profit checks are evaluated on the bar after entry has been established, including the entry bar itself
+- if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped and no trade is opened
 - if both stop-loss and take-profit are touched in the same bar, the engine uses the conservative deterministic rule: stop-loss is assumed to trigger first
 - if a position is still open at the end of the data window, it is closed on the final bar close using the configured execution adjustments
 
@@ -55,6 +61,8 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 - `take_profit`
 - `forced_end`
 
+When ATR mode is used, `trades.parquet` also includes `atr_at_entry`.
+
 ## Connection To The Visualization Framework
 
 `trades.parquet` is saved in the same normalized schema used by the chart overlay tools, so a completed backtest run can be visualized directly with `scripts/plot_candles.py`.
@@ -65,12 +73,14 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 - there is no optimization, walk-forward, or sweep framework yet
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
-- only one stop-loss / take-profit mode is supported in v1: `absolute`
+- ATR is frozen at entry; there is no ATR trailing-stop logic in Phase A
+- there is no higher-timeframe ATR support
 - equity is tracked with realized equity plus close-based mark-to-market for an open position
 
 ## Next Recommended Extensions
 
 - add more reference strategies behind the same signal contract
+- add ATR trailing and other dynamic exit models only after the frozen-ATR baseline is stable
 - add richer position sizing modes
 - add parameter sweep tooling and experiment summaries
 - add walk-forward evaluation and regime segmentation

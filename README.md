@@ -288,7 +288,11 @@ Execution assumptions:
 - only one open position is supported at a time in v1
 - long and short entries use the next bar open adjusted by configured spread and slippage
 - opposite signals exit on the next bar open and can flip into the new direction on that same open
-- stop-loss and take-profit use the `absolute` mode in v1, meaning absolute price distance from the adjusted entry price
+- stop-loss and take-profit support `absolute` and `atr` modes
+- ATR uses standard true range: `max(high-low, abs(high-prev_close), abs(low-prev_close))`
+- supported ATR smoothing methods are `wilder`, `sma`, and `ema`
+- when ATR mode is used, the engine reads ATR from the signal bar close, enters on the next bar open, and freezes that ATR value for the life of the trade
+- if ATR is not available yet on the signal bar because of warmup, that signal is skipped and no trade is opened
 - if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
 
 Outputs are saved to:
@@ -345,7 +349,57 @@ python scripts/run_backtest.py \
   --output-root outputs/backtests
 ```
 
-The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `take_profit`, and `forced_end`, and stays compatible with the existing candle overlay CLI.
+Run the backtest with ATR-based exits:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --output-root outputs/backtests
+```
+
+Mixed mode is also supported, for example ATR stop with absolute take-profit:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.5 \
+  --take-profit 0.0080 \
+  --stop-loss-mode atr \
+  --take-profit-mode absolute \
+  --atr-period 14 \
+  --atr-method wilder \
+  --output-root outputs/backtests
+```
+
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `take_profit`, and `forced_end`, plus `atr_at_entry` when ATR mode is used. It stays compatible with the existing candle overlay CLI.
 
 Visualize the resulting trades on candles:
 

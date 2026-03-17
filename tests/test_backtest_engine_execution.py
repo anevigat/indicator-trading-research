@@ -50,6 +50,8 @@ def build_config(**overrides: object) -> BacktestConfig:
         "stop_loss": None,
         "take_profit_mode": None,
         "take_profit": None,
+        "atr_period": 14,
+        "atr_method": "wilder",
     }
     payload.update(overrides)
     return BacktestConfig(**payload)
@@ -219,4 +221,149 @@ def test_invalid_stop_take_profit_config_fails_clearly(overrides: dict[str, obje
     config = build_config(**overrides)
 
     with pytest.raises(ValueError, match=message):
+        run_backtest(candles, signals, config)
+
+
+def test_atr_long_stop_and_target_are_placed_from_signal_bar_atr() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 10.0, 11.0, 9.0, 10.0),
+            ("2025-01-01T00:15:00Z", 12.0, 15.0, 11.0, 13.0),
+            ("2025-01-01T00:30:00Z", 20.0, 20.5, 19.5, 20.1),
+            ("2025-01-01T00:45:00Z", 20.2, 20.4, 19.9, 20.0),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:15:00Z", 1)])
+    config = build_config(
+        stop_loss_mode="atr",
+        stop_loss=1.0,
+        take_profit_mode="atr",
+        take_profit=2.0,
+        atr_period=2,
+        atr_method="sma",
+    )
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    assert trade["atr_at_entry"] == pytest.approx(3.5)
+    assert trade["entry_time"] == pd.Timestamp("2025-01-01T00:30:00Z")
+    assert trade["stop_loss"] == pytest.approx(16.5)
+    assert trade["take_profit"] == pytest.approx(27.0)
+
+
+def test_atr_short_stop_and_target_are_placed_from_signal_bar_atr() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 9.0, 10.0, 8.0, 9.0),
+            ("2025-01-01T00:15:00Z", 9.5, 13.0, 8.0, 10.0),
+            ("2025-01-01T00:30:00Z", 20.0, 20.5, 19.5, 19.9),
+            ("2025-01-01T00:45:00Z", 19.8, 20.0, 19.4, 19.7),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:15:00Z", -1)])
+    config = build_config(
+        stop_loss_mode="atr",
+        stop_loss=1.0,
+        take_profit_mode="atr",
+        take_profit=2.0,
+        atr_period=2,
+        atr_method="sma",
+    )
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    assert trade["atr_at_entry"] == pytest.approx(3.5)
+    assert trade["entry_time"] == pd.Timestamp("2025-01-01T00:30:00Z")
+    assert trade["stop_loss"] == pytest.approx(23.5)
+    assert trade["take_profit"] == pytest.approx(13.0)
+
+
+@pytest.mark.parametrize(
+    ("stop_mode", "stop_value", "expected_stop", "take_mode", "take_value", "expected_take"),
+    [
+        ("atr", 1.5, 14.75, "absolute", 0.75, 20.75),
+        ("absolute", 0.5, 19.5, "atr", 2.0, 27.0),
+    ],
+)
+def test_mixed_absolute_and_atr_modes_work_together(
+    stop_mode: str,
+    stop_value: float,
+    expected_stop: float,
+    take_mode: str,
+    take_value: float,
+    expected_take: float,
+) -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 10.0, 11.0, 9.0, 10.0),
+            ("2025-01-01T00:15:00Z", 12.0, 15.0, 11.0, 13.0),
+            ("2025-01-01T00:30:00Z", 20.0, 20.4, 19.8, 20.1),
+            ("2025-01-01T00:45:00Z", 20.2, 20.5, 19.9, 20.0),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:15:00Z", 1)])
+    config = build_config(
+        stop_loss_mode=stop_mode,
+        stop_loss=stop_value,
+        take_profit_mode=take_mode,
+        take_profit=take_value,
+        atr_period=2,
+        atr_method="sma",
+    )
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    assert trade["stop_loss"] == pytest.approx(expected_stop)
+    assert trade["take_profit"] == pytest.approx(expected_take)
+
+
+def test_atr_warmup_skips_signal_until_atr_is_available() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 10.0, 11.0, 9.0, 10.0),
+            ("2025-01-01T00:15:00Z", 10.1, 10.5, 9.9, 10.2),
+            ("2025-01-01T00:30:00Z", 10.2, 10.6, 10.0, 10.3),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:00:00Z", 1)])
+    config = build_config(stop_loss_mode="atr", stop_loss=1.0, atr_period=3, atr_method="wilder")
+
+    result = run_backtest(candles, signals, config)
+
+    assert result.trades.empty
+
+
+def test_atr_is_frozen_from_signal_bar_and_does_not_look_ahead_to_entry_bar() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 9.5, 10.0, 8.0, 9.0),
+            ("2025-01-01T00:15:00Z", 10.0, 11.0, 9.0, 10.0),
+            ("2025-01-01T00:30:00Z", 100.0, 110.0, 90.0, 100.0),
+            ("2025-01-01T00:45:00Z", 100.0, 101.0, 99.0, 100.0),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:15:00Z", 1)])
+    config = build_config(stop_loss_mode="atr", stop_loss=1.0, atr_period=2, atr_method="sma")
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    assert trade["atr_at_entry"] == pytest.approx(2.0)
+    assert trade["stop_loss"] == pytest.approx(98.0)
+
+
+def test_invalid_atr_method_in_engine_config_fails_clearly() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 1.1000, 1.1001, 1.0999, 1.1000),
+            ("2025-01-01T00:15:00Z", 1.1005, 1.1006, 1.1004, 1.1005),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:00:00Z", 1)])
+    config = build_config(stop_loss_mode="atr", stop_loss=1.0, atr_method="bad_method")
+
+    with pytest.raises(ValueError, match="Unsupported atr_method"):
         run_backtest(candles, signals, config)
