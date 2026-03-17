@@ -225,6 +225,53 @@ Safeguards:
 
 Future trade overlays will plug into the same `indicator_trading_research.visualization` package rather than requiring a redesign later.
 
+## Plotting Trades On Top Of Candles
+
+Trade overlays use the normalized schema documented in `docs/research/trade_overlay_schema.md`.
+
+Supported overlay inputs:
+
+- parquet preferred
+- csv also supported
+- required plotting fields: `trade_id`, `side`, `entry_time`, `entry_price`
+- `pair` and `timeframe` are strongly recommended for reusable multi-pair files
+
+Generate deterministic synthetic demo trades:
+
+```bash
+python scripts/generate_demo_trades.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-05 \
+  --output outputs/demo/eurusd_15m_demo_trades.parquet
+```
+
+Plot candles with trade overlays:
+
+```bash
+python scripts/plot_candles.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 15m \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-05 \
+  --trades-file outputs/demo/eurusd_15m_demo_trades.parquet \
+  --show-entries \
+  --show-exits \
+  --show-stop-loss \
+  --show-take-profit \
+  --show-trade-lines \
+  --output outputs/charts/eurusd_15m_demo_trades.html
+```
+
+Known limitations:
+
+- trade overlays currently plug into `plot_candles.py` only; `compare_timeframes.py` remains candle-focused for now
+- the overlay layer is for chart review, not backtest accounting
+- open trades render as entry-only unless exit data is present
+
 ## Notes
 
 - The audit note at `docs/research/phase1_bootstrap_and_data_audit.md` is generated from the reusable audit script.

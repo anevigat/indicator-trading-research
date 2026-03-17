@@ -13,9 +13,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from indicator_trading_research.visualization import (  # noqa: E402
+    TradeOverlayOptions,
     create_candlestick_figure,
     format_warnings,
     load_processed_candles,
+    load_trade_overlays,
     save_figure_html,
 )
 
@@ -30,9 +32,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="HTML output path.")
     parser.add_argument("--sma", nargs="*", type=int, default=[], help="Optional SMA windows.")
     parser.add_argument("--ema", nargs="*", type=int, default=[], help="Optional EMA windows.")
+    parser.add_argument("--trades-file", help="Optional parquet or csv trade overlay file.")
+    parser.add_argument("--show-entries", action="store_true", help="Show trade entry markers.")
+    parser.add_argument("--show-exits", action="store_true", help="Show trade exit markers.")
+    parser.add_argument("--show-stop-loss", action="store_true", help="Show stop-loss lines when present.")
+    parser.add_argument("--show-take-profit", action="store_true", help="Show take-profit lines when present.")
+    parser.add_argument("--show-trade-lines", action="store_true", help="Show entry-to-exit trade lines.")
     parser.add_argument("--max-bars", type=int, default=5000, help="Maximum bars to plot before failing.")
     parser.add_argument("--truncate", action="store_true", help="Truncate to max-bars instead of failing.")
     return parser.parse_args()
+
+
+def resolve_trade_options(args: argparse.Namespace) -> TradeOverlayOptions:
+    any_toggle = any(
+        [
+            args.show_entries,
+            args.show_exits,
+            args.show_stop_loss,
+            args.show_take_profit,
+            args.show_trade_lines,
+        ]
+    )
+    return TradeOverlayOptions(
+        show_entries=args.show_entries or not any_toggle,
+        show_exits=args.show_exits or not any_toggle,
+        show_stop_loss=args.show_stop_loss,
+        show_take_profit=args.show_take_profit,
+        show_trade_lines=args.show_trade_lines,
+    )
 
 
 def main() -> None:
@@ -47,12 +74,25 @@ def main() -> None:
             max_bars=args.max_bars,
             truncate=args.truncate,
         )
+        trade_frame = None
+        if args.trades_file:
+            trade_frame, trade_warnings, trade_source = load_trade_overlays(
+                trades_file=args.trades_file,
+                pair=args.pair,
+                timeframe=args.timeframe,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+            warnings.extend(trade_warnings)
+            print(f"Loaded {len(trade_frame)} matching trades from {trade_source}")
         figure = create_candlestick_figure(
             frame,
             pair=args.pair,
             timeframe=args.timeframe,
             sma_windows=args.sma,
             ema_windows=args.ema,
+            trades=trade_frame,
+            trade_options=resolve_trade_options(args) if args.trades_file else None,
         )
         output_path = save_figure_html(figure, args.output)
     except Exception as exc:
