@@ -28,6 +28,10 @@ class BacktestConfig:
     stop_loss: float | None = None
     take_profit_mode: str | None = None
     take_profit: float | None = None
+    trailing_stop_mode: str | None = None
+    trailing_stop: float | None = None
+    trailing_activation_mode: str | None = None
+    trailing_activation: float | None = None
     atr_period: int = 14
     atr_method: str = "wilder"
 
@@ -53,6 +57,9 @@ class TradeRecord:
     strategy_name: str | None = None
     notes: str | None = None
     atr_at_entry: float | None = None
+    trailing_stop_initial: float | None = None
+    trailing_stop_final: float | None = None
+    trailing_stop_exit_hit: bool | None = None
     exit_reason: str | None = None
     duration_bars: int | None = None
     gross_pnl: float | None = None

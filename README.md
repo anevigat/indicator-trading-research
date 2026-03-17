@@ -289,10 +289,19 @@ Execution assumptions:
 - long and short entries use the next bar open adjusted by configured spread and slippage
 - opposite signals exit on the next bar open and can flip into the new direction on that same open
 - stop-loss and take-profit support `absolute` and `atr` modes
+- optional trailing stop support exists in Phase T1 with `absolute` and `atr` modes
 - ATR uses standard true range: `max(high-low, abs(high-prev_close), abs(low-prev_close))`
 - supported ATR smoothing methods are `wilder`, `sma`, and `ema`
 - when ATR mode is used, the engine reads ATR from the signal bar close, enters on the next bar open, and freezes that ATR value for the life of the trade
-- if ATR is not available yet on the signal bar because of warmup, that signal is skipped and no trade is opened
+- if ATR is not available yet on the signal bar because of warmup, the signal is skipped only when an entry-time ATR-dependent protection needs it
+- trailing stop updates use close-only ratcheting after hit checks, so a newly tightened trail starts applying from the next bar
+- trailing stop never loosens: it only tightens in the favorable direction
+- if trailing activation is omitted, trailing activates immediately after entry
+- if trailing activation is set, activation is checked using bar range
+- trailing stop shares the same conservative stop-first rule versus take-profit: the active stop side wins when both stop-side and target are reachable in the same bar
+- when trailing distance uses `atr`, the engine uses live ATR on each bar for updates
+- when trailing activation uses `atr`, the engine uses `atr_at_entry` as the activation reference
+- if trailing distance uses `atr` and ATR is unavailable on a given update bar, the trade stays open and trailing simply does not tighten on that bar
 - if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
 
 Outputs are saved to:
@@ -399,7 +408,63 @@ python scripts/run_backtest.py \
   --output-root outputs/backtests
 ```
 
-The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `take_profit`, and `forced_end`, plus `atr_at_entry` when ATR mode is used. It stays compatible with the existing candle overlay CLI.
+Immediate ATR trailing is also supported:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --trailing-stop 1.5 \
+  --trailing-stop-mode atr \
+  --output-root outputs/backtests
+```
+
+Activated ATR trailing is supported too:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --trailing-stop 1.5 \
+  --trailing-stop-mode atr \
+  --trailing-activation 1.0 \
+  --trailing-activation-mode atr \
+  --output-root outputs/backtests
+```
+
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, and `trailing_stop_final`. It stays compatible with the existing candle overlay CLI.
 
 Visualize the resulting trades on candles:
 
