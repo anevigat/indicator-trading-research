@@ -35,6 +35,7 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - mixed modes are supported, for example ATR stop with absolute target or absolute stop with ATR target
 - optional trailing stop support exists in Phase T1
 - trailing stop supports two modes: `absolute` and `atr`
+- Phase T2 also supports `chandelier` trailing and optional `break_even` stop logic
 - trailing stop updates use close-only ratcheting after hit checks, so any newly tightened trail applies from the next bar onward
 - long trailing update: `max(previous_trailing_stop, close - distance)`
 - short trailing update: `min(previous_trailing_stop, close + distance)`
@@ -42,10 +43,19 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - if activation is configured, the engine checks activation using current bar range and then updates the trail after hit checks
 - `trailing_activation_mode=atr` uses `atr_at_entry` as the activation reference
 - `trailing_stop_mode=atr` uses live ATR on each update bar when ATR is available
+- chandelier trailing uses highest-high / lowest-low since entry together with live ATR on each update bar
+- long chandelier candidate: `highest_high_since_entry - chandelier_multiplier * ATR`
+- short chandelier candidate: `lowest_low_since_entry + chandelier_multiplier * ATR`
+- chandelier trailing still ratchets only in the favorable direction and still applies from the next bar because updates happen after hit checks
 - if ATR is unavailable for ATR-based trailing updates, the trade stays open and trailing simply does not update on that bar
+- break-even can be configured in `absolute` or `atr` mode
+- break-even activation is checked using current bar range
+- `break_even_mode=atr` uses `atr_at_entry` as the activation reference
+- `break_even_buffer_mode=atr` also uses `atr_at_entry`
+- when break-even activates, the stop moves to entry plus or minus the configured buffer and never loosens after activation
 - intrabar stop-loss and take-profit checks are evaluated on the bar after entry has been established, including the entry bar itself
 - if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped only when an entry-time ATR-dependent protection requires `atr_at_entry`
-- the effective stop is the tighter of static stop-loss and trailing stop
+- the effective stop is the tightest active stop among static stop-loss, break-even, and trailing stop
 - if both stop-side and take-profit are touched in the same bar, the engine uses the conservative deterministic rule: the active stop side is assumed to trigger first
 - if a position is still open at the end of the data window, it is closed on the final bar close using the configured execution adjustments
 
@@ -69,7 +79,9 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 
 - `signal_exit`
 - `stop_loss`
+- `break_even`
 - `trailing_stop`
+- `chandelier_trailing_stop`
 - `take_profit`
 - `forced_end`
 
@@ -80,6 +92,8 @@ Phase T1 trailing adds these optional output fields:
 - `trailing_stop_initial`
 - `trailing_stop_final`
 - `trailing_stop_exit_hit`
+- `break_even_stop_price`
+- `break_even_exit_hit`
 
 ## Connection To The Visualization Framework
 
@@ -91,8 +105,8 @@ Phase T1 trailing adds these optional output fields:
 - there is no optimization, walk-forward, or sweep framework yet
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
-- trailing stop updates are close-only in Phase T1
-- there is no chandelier, stepped, break-even, or trailing-take-profit logic
+- trailing stop and chandelier updates are close-only in Phase T2
+- there is no stepped trailing, break-even-to-trail handoff customization, or trailing-take-profit logic
 - there is no higher-timeframe ATR support
 - equity is tracked with realized equity plus close-based mark-to-market for an open position
 

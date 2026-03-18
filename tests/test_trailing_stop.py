@@ -293,7 +293,7 @@ def test_atr_trailing_distance_waits_for_atr_warmup_without_blocking_entry() -> 
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"trailing_activation": 1.0}, "trailing_activation requires trailing_stop"),
+        ({"trailing_activation": 1.0}, "trailing_activation requires trailing stop configuration"),
         ({"trailing_stop_mode": "bad_mode", "trailing_stop": 1.0}, "Unsupported trailing_stop_mode"),
         ({"trailing_stop_mode": "absolute", "trailing_stop": -1.0}, "trailing_stop must be positive"),
         ({"trailing_activation_mode": "bad_mode", "trailing_stop": 1.0, "trailing_activation": 1.0}, "Unsupported trailing_activation_mode"),

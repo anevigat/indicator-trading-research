@@ -15,6 +15,9 @@ Execution rules are intentionally explicit:
   hit checks, so a newly tightened trail only applies from the next bar onward
 - ATR-based trailing distance uses live ATR on each bar when available
 - ATR-based trailing activation uses ATR at entry when available
+- chandelier trailing uses highest-high / lowest-low since entry with live ATR
+- break-even stop activates after hit checks and competes with other stop-side
+  protections using the tightest stop on each bar
 - if both stop-loss and take-profit are touched within the same bar, the engine
   assumes stop-loss triggers first
 - an open trade at the end of the data is forced flat on the final bar close
@@ -33,6 +36,7 @@ from .metrics import compute_backtest_metrics
 
 SUPPORTED_PROTECTION_MODES = {"absolute", "atr"}
 SUPPORTED_ATR_METHODS = {"wilder", "sma", "ema"}
+SUPPORTED_TRAILING_TYPES = {"standard", "chandelier"}
 
 
 @dataclass
@@ -47,6 +51,11 @@ class OpenPosition:
     trailing_active: bool
     trailing_stop_price: float | None
     trailing_stop_initial: float | None
+    trailing_stop_reason: str | None
+    break_even_active: bool
+    break_even_stop_price: float | None
+    high_since_entry: float
+    low_since_entry: float
     size: float
     strategy_name: str
     entry_bar_index: int
@@ -59,13 +68,16 @@ def _execution_price(side: str, base_price: float, *, spread: float, slippage: f
     return base_price - half_spread - slippage if is_entry else base_price + half_spread + slippage
 
 
-def _normalize_protection_mode(name: str, mode: str | None, value: float | None) -> str | None:
+def _normalize_protection_mode(name: str, mode: str | None, value: float | None, *, allow_zero: bool = False) -> str | None:
     if value is None:
         if mode is not None:
             raise ValueError(f"{name}_mode requires {name} to be set.")
         return None
 
-    if value <= 0:
+    if allow_zero:
+        if value < 0:
+            raise ValueError(f"{name} must be zero or positive when provided.")
+    elif value <= 0:
         raise ValueError(f"{name} must be positive when provided.")
 
     normalized_mode = (mode or "absolute").strip().lower()
@@ -73,6 +85,24 @@ def _normalize_protection_mode(name: str, mode: str | None, value: float | None)
         supported = ", ".join(sorted(SUPPORTED_PROTECTION_MODES))
         raise ValueError(f"Unsupported {name}_mode: {mode!r}. Supported modes: {supported}.")
     return normalized_mode
+
+
+def _normalize_trailing_type(value: str | None) -> str:
+    normalized = (value or "standard").strip().lower()
+    if normalized not in SUPPORTED_TRAILING_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_TRAILING_TYPES))
+        raise ValueError(f"Unsupported trailing_type: {value!r}. Supported types: {supported}.")
+    return normalized
+
+
+def _validate_atr_settings(period: int, method: str, *, period_name: str, method_name: str) -> str:
+    if not isinstance(period, int) or period <= 0:
+        raise ValueError(f"{period_name} must be a positive integer.")
+    normalized_method = method.strip().lower()
+    if normalized_method not in SUPPORTED_ATR_METHODS:
+        supported = ", ".join(sorted(SUPPORTED_ATR_METHODS))
+        raise ValueError(f"Unsupported {method_name}: {method!r}. Supported methods: {supported}.")
+    return normalized_method
 
 
 def _validate_config(config: BacktestConfig) -> None:
@@ -91,16 +121,44 @@ def _validate_config(config: BacktestConfig) -> None:
 
     config.stop_loss_mode = _normalize_protection_mode("stop_loss", config.stop_loss_mode, config.stop_loss)
     config.take_profit_mode = _normalize_protection_mode("take_profit", config.take_profit_mode, config.take_profit)
+    config.trailing_type = _normalize_trailing_type(config.trailing_type)
     config.trailing_stop_mode = _normalize_protection_mode("trailing_stop", config.trailing_stop_mode, config.trailing_stop)
     config.trailing_activation_mode = _normalize_protection_mode("trailing_activation", config.trailing_activation_mode, config.trailing_activation)
-    if config.trailing_activation is not None and config.trailing_stop is None:
-        raise ValueError("trailing_activation requires trailing_stop to be set.")
-    if not isinstance(config.atr_period, int) or config.atr_period <= 0:
-        raise ValueError("atr_period must be a positive integer.")
-    config.atr_method = config.atr_method.strip().lower()
-    if config.atr_method not in SUPPORTED_ATR_METHODS:
-        supported = ", ".join(sorted(SUPPORTED_ATR_METHODS))
-        raise ValueError(f"Unsupported atr_method: {config.atr_method!r}. Supported methods: {supported}.")
+    config.break_even_mode = _normalize_protection_mode("break_even", config.break_even_mode, config.break_even)
+    if config.break_even is not None and config.break_even_buffer is None:
+        config.break_even_buffer = 0.0
+    config.break_even_buffer_mode = _normalize_protection_mode(
+        "break_even_buffer",
+        config.break_even_buffer_mode,
+        config.break_even_buffer,
+        allow_zero=True,
+    )
+
+    has_standard_trailing = config.trailing_type == "standard" and config.trailing_stop is not None
+    has_chandelier_trailing = config.trailing_type == "chandelier" and config.chandelier_multiplier is not None
+    if config.trailing_activation is not None and not (has_standard_trailing or has_chandelier_trailing):
+        raise ValueError("trailing_activation requires trailing stop configuration.")
+    if config.trailing_type == "standard":
+        if config.chandelier_multiplier is not None:
+            raise ValueError("chandelier_multiplier is only used with trailing_type='chandelier'.")
+    else:
+        if config.trailing_stop is not None or config.trailing_stop_mode is not None:
+            raise ValueError("trailing_stop and trailing_stop_mode are not used with trailing_type='chandelier'.")
+        if config.chandelier_multiplier is None or config.chandelier_multiplier <= 0:
+            raise ValueError("trailing_type='chandelier' requires a positive chandelier_multiplier.")
+        config.chandelier_atr_method = _validate_atr_settings(
+            config.chandelier_atr_period,
+            config.chandelier_atr_method,
+            period_name="chandelier_atr_period",
+            method_name="chandelier_atr_method",
+        )
+
+    config.atr_method = _validate_atr_settings(
+        config.atr_period,
+        config.atr_method,
+        period_name="atr_period",
+        method_name="atr_method",
+    )
     uses_atr = any(
         mode == "atr"
         for mode in (
@@ -108,6 +166,8 @@ def _validate_config(config: BacktestConfig) -> None:
             config.take_profit_mode,
             config.trailing_stop_mode,
             config.trailing_activation_mode,
+            config.break_even_mode,
+            config.break_even_buffer_mode,
         )
     )
     if uses_atr:
@@ -119,26 +179,25 @@ def _validate_config(config: BacktestConfig) -> None:
             raise ValueError("trailing_stop_mode='atr' requires trailing_stop to be set.")
         if config.trailing_activation_mode == "atr" and config.trailing_activation is None:
             raise ValueError("trailing_activation_mode='atr' requires trailing_activation to be set.")
+        if config.break_even_mode == "atr" and config.break_even is None:
+            raise ValueError("break_even_mode='atr' requires break_even to be set.")
+        if config.break_even_buffer_mode == "atr" and config.break_even_buffer is None:
+            raise ValueError("break_even_buffer_mode='atr' requires break_even_buffer to be set.")
 
 
 def _effective_stop(position: OpenPosition) -> tuple[float | None, str | None]:
-    static_stop = position.stop_loss
-    trailing_stop = position.trailing_stop_price
-    if static_stop is None and trailing_stop is None:
+    candidates: list[tuple[float, str]] = []
+    if position.stop_loss is not None:
+        candidates.append((position.stop_loss, "stop_loss"))
+    if position.break_even_stop_price is not None:
+        candidates.append((position.break_even_stop_price, "break_even"))
+    if position.trailing_stop_price is not None and position.trailing_stop_reason is not None:
+        candidates.append((position.trailing_stop_price, position.trailing_stop_reason))
+    if not candidates:
         return None, None
-    if static_stop is None:
-        return trailing_stop, "trailing_stop"
-    if trailing_stop is None:
-        return static_stop, "stop_loss"
-
     if position.side == "long":
-        if trailing_stop > static_stop:
-            return trailing_stop, "trailing_stop"
-        return static_stop, "stop_loss"
-
-    if trailing_stop < static_stop:
-        return trailing_stop, "trailing_stop"
-    return static_stop, "stop_loss"
+        return max(candidates, key=lambda item: item[0])
+    return min(candidates, key=lambda item: item[0])
 
 
 def _resolve_exit_from_bar(position: OpenPosition, bar: pd.Series) -> tuple[float, str] | None:
@@ -212,8 +271,20 @@ def _trailing_activation_distance(position: OpenPosition, config: BacktestConfig
     return None
 
 
+def _has_trailing(config: BacktestConfig) -> bool:
+    if config.trailing_type == "standard":
+        return config.trailing_stop is not None
+    return config.chandelier_multiplier is not None
+
+
+def _trailing_reason(config: BacktestConfig) -> str | None:
+    if not _has_trailing(config):
+        return None
+    return "chandelier_trailing_stop" if config.trailing_type == "chandelier" else "trailing_stop"
+
+
 def _should_activate_trailing(position: OpenPosition, bar: pd.Series, config: BacktestConfig) -> bool:
-    if config.trailing_stop is None or position.trailing_active:
+    if not _has_trailing(config) or position.trailing_active:
         return position.trailing_active
     if config.trailing_activation is None:
         return True
@@ -239,8 +310,70 @@ def _trailing_distance(config: BacktestConfig, current_atr: float | None) -> flo
     return None
 
 
-def _update_trailing_stop(position: OpenPosition, bar: pd.Series, config: BacktestConfig, *, current_atr: float | None) -> None:
-    if config.trailing_stop is None:
+def _break_even_distance(position: OpenPosition, config: BacktestConfig, *, for_buffer: bool) -> float | None:
+    value = config.break_even_buffer if for_buffer else config.break_even
+    mode = config.break_even_buffer_mode if for_buffer else config.break_even_mode
+    if value is None:
+        return None
+    if mode == "absolute":
+        return value
+    if mode == "atr":
+        if position.atr_at_entry is None or pd.isna(position.atr_at_entry):
+            return None
+        return value * position.atr_at_entry
+    return None
+
+
+def _update_extrema(position: OpenPosition, bar: pd.Series) -> None:
+    position.high_since_entry = max(position.high_since_entry, float(bar["high"]))
+    position.low_since_entry = min(position.low_since_entry, float(bar["low"]))
+
+
+def _update_break_even_stop(position: OpenPosition, bar: pd.Series, config: BacktestConfig) -> None:
+    if config.break_even is None or position.break_even_active:
+        return
+
+    activation_distance = _break_even_distance(position, config, for_buffer=False)
+    if activation_distance is None:
+        return
+
+    should_activate = False
+    if position.side == "long":
+        should_activate = float(bar["high"]) >= position.entry_price + activation_distance
+    else:
+        should_activate = float(bar["low"]) <= position.entry_price - activation_distance
+    if not should_activate:
+        return
+
+    buffer_distance = _break_even_distance(position, config, for_buffer=True)
+    if buffer_distance is None:
+        return
+
+    position.break_even_active = True
+    if position.side == "long":
+        position.break_even_stop_price = position.entry_price + buffer_distance
+    else:
+        position.break_even_stop_price = position.entry_price - buffer_distance
+
+
+def _chandelier_candidate(position: OpenPosition, chandelier_atr: float | None, config: BacktestConfig) -> float | None:
+    if config.chandelier_multiplier is None or chandelier_atr is None or pd.isna(chandelier_atr):
+        return None
+    distance = config.chandelier_multiplier * chandelier_atr
+    if position.side == "long":
+        return position.high_since_entry - distance
+    return position.low_since_entry + distance
+
+
+def _update_trailing_stop(
+    position: OpenPosition,
+    bar: pd.Series,
+    config: BacktestConfig,
+    *,
+    current_atr: float | None,
+    chandelier_atr: float | None,
+) -> None:
+    if not _has_trailing(config):
         return
 
     if not position.trailing_active:
@@ -248,20 +381,25 @@ def _update_trailing_stop(position: OpenPosition, bar: pd.Series, config: Backte
     if not position.trailing_active:
         return
 
-    distance = _trailing_distance(config, current_atr)
-    if distance is None:
-        return
+    position.trailing_stop_reason = _trailing_reason(config)
+    if config.trailing_type == "chandelier":
+        candidate = _chandelier_candidate(position, chandelier_atr, config)
+        if candidate is None:
+            return
+    else:
+        distance = _trailing_distance(config, current_atr)
+        if distance is None:
+            return
+        close_price = float(bar["close"])
+        candidate = close_price - distance if position.side == "long" else close_price + distance
 
-    close_price = float(bar["close"])
     if position.side == "long":
-        candidate = close_price - distance
         if position.trailing_stop_price is None:
             position.trailing_stop_price = candidate
             position.trailing_stop_initial = candidate
         else:
             position.trailing_stop_price = max(position.trailing_stop_price, candidate)
     else:
-        candidate = close_price + distance
         if position.trailing_stop_price is None:
             position.trailing_stop_price = candidate
             position.trailing_stop_initial = candidate
@@ -291,7 +429,9 @@ def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price:
         atr_at_entry=position.atr_at_entry,
         trailing_stop_initial=position.trailing_stop_initial,
         trailing_stop_final=position.trailing_stop_price,
-        trailing_stop_exit_hit=exit_reason == "trailing_stop",
+        trailing_stop_exit_hit=exit_reason in {"trailing_stop", "chandelier_trailing_stop"},
+        break_even_stop_price=position.break_even_stop_price,
+        break_even_exit_hit=exit_reason == "break_even",
         exit_reason=exit_reason,
         duration_bars=exit_bar_index - position.entry_bar_index,
         gross_pnl=gross_pnl,
@@ -312,15 +452,25 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             config.take_profit_mode,
             config.trailing_stop_mode,
             config.trailing_activation_mode,
+            config.break_even_mode,
+            config.break_even_buffer_mode,
         )
     )
     atr_series = compute_atr(candles, period=config.atr_period, method=config.atr_method) if needs_atr else None
+    needs_chandelier_atr = config.trailing_type == "chandelier" and config.chandelier_multiplier is not None
+    chandelier_atr_series = (
+        compute_atr(candles, period=config.chandelier_atr_period, method=config.chandelier_atr_method)
+        if needs_chandelier_atr
+        else None
+    )
     requires_atr_at_entry = any(
         mode == "atr"
         for mode in (
             config.stop_loss_mode,
             config.take_profit_mode,
             config.trailing_activation_mode,
+            config.break_even_mode,
+            config.break_even_buffer_mode,
         )
     )
 
@@ -375,9 +525,14 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     atr_at_entry=atr_at_signal,
-                    trailing_active=config.trailing_stop is not None and config.trailing_activation is None,
+                    trailing_active=_has_trailing(config) and config.trailing_activation is None,
                     trailing_stop_price=None,
                     trailing_stop_initial=None,
+                    trailing_stop_reason=_trailing_reason(config),
+                    break_even_active=False,
+                    break_even_stop_price=None,
+                    high_since_entry=float(current_bar["high"]),
+                    low_since_entry=float(current_bar["low"]),
                     size=config.fixed_position_size,
                     strategy_name=config.strategy_name,
                     entry_bar_index=index,
@@ -393,8 +548,15 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 realized_equity += float(trade.net_pnl or 0.0)
                 position = None
             else:
+                _update_extrema(position, current_bar)
+                _update_break_even_stop(position, current_bar, config)
                 current_atr = float(atr_series.iloc[index]) if atr_series is not None and pd.notna(atr_series.iloc[index]) else None
-                _update_trailing_stop(position, current_bar, config, current_atr=current_atr)
+                chandelier_atr = (
+                    float(chandelier_atr_series.iloc[index])
+                    if chandelier_atr_series is not None and pd.notna(chandelier_atr_series.iloc[index])
+                    else None
+                )
+                _update_trailing_stop(position, current_bar, config, current_atr=current_atr, chandelier_atr=chandelier_atr)
 
         mark_to_market = realized_equity
         if position is not None:
@@ -448,6 +610,8 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 "trailing_stop_initial",
                 "trailing_stop_final",
                 "trailing_stop_exit_hit",
+                "break_even_stop_price",
+                "break_even_exit_hit",
                 "exit_reason",
                 "duration_bars",
                 "gross_pnl",

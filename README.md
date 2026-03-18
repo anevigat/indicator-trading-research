@@ -290,6 +290,7 @@ Execution assumptions:
 - opposite signals exit on the next bar open and can flip into the new direction on that same open
 - stop-loss and take-profit support `absolute` and `atr` modes
 - optional trailing stop support exists in Phase T1 with `absolute` and `atr` modes
+- Phase T2 adds `chandelier` trailing and optional break-even stop support
 - ATR uses standard true range: `max(high-low, abs(high-prev_close), abs(low-prev_close))`
 - supported ATR smoothing methods are `wilder`, `sma`, and `ema`
 - when ATR mode is used, the engine reads ATR from the signal bar close, enters on the next bar open, and freezes that ATR value for the life of the trade
@@ -298,10 +299,19 @@ Execution assumptions:
 - trailing stop never loosens: it only tightens in the favorable direction
 - if trailing activation is omitted, trailing activates immediately after entry
 - if trailing activation is set, activation is checked using bar range
+- standard trailing uses `close - distance` for long trades and `close + distance` for short trades
+- chandelier trailing uses highest-high / lowest-low since entry with live ATR on each bar:
+  long `highest_high_since_entry - multiplier * ATR`
+  short `lowest_low_since_entry + multiplier * ATR`
+- chandelier trailing uses the same activation config as standard trailing and still updates only after hit checks
 - trailing stop shares the same conservative stop-first rule versus take-profit: the active stop side wins when both stop-side and target are reachable in the same bar
 - when trailing distance uses `atr`, the engine uses live ATR on each bar for updates
 - when trailing activation uses `atr`, the engine uses `atr_at_entry` as the activation reference
 - if trailing distance uses `atr` and ATR is unavailable on a given update bar, the trade stays open and trailing simply does not tighten on that bar
+- break-even stop is optional and activates only after price has moved far enough in favor
+- when break-even activates, the engine moves the stop to entry plus or minus the configured buffer and never loosens it afterward
+- break-even activation in `atr` mode uses `atr_at_entry`, and the optional break-even buffer in `atr` mode also uses `atr_at_entry`
+- when stop-loss, break-even, and trailing are all present, the effective stop for the bar is the tightest active stop
 - if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
 
 Outputs are saved to:
@@ -464,7 +474,69 @@ python scripts/run_backtest.py \
   --output-root outputs/backtests
 ```
 
-The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, and `trailing_stop_final`. It stays compatible with the existing candle overlay CLI.
+Chandelier trailing is also supported:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --trailing-type chandelier \
+  --chandelier-multiplier 1.5 \
+  --chandelier-atr-period 14 \
+  --chandelier-atr-method wilder \
+  --trailing-activation 1.0 \
+  --trailing-activation-mode atr \
+  --output-root outputs/backtests
+```
+
+Break-even can run alongside the existing protections:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --trailing-type chandelier \
+  --chandelier-multiplier 1.5 \
+  --break-even 1.0 \
+  --break-even-mode atr \
+  --break-even-buffer 0.25 \
+  --break-even-buffer-mode atr \
+  --output-root outputs/backtests
+```
+
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `break_even`, `trailing_stop`, `chandelier_trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, `trailing_stop_final`, and `break_even_stop_price`. It stays compatible with the existing candle overlay CLI.
 
 Visualize the resulting trades on candles:
 
