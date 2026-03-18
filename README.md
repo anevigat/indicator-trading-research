@@ -662,6 +662,60 @@ python scripts/plot_candles.py \
   --output outputs/charts/eurusd_15m_sma_backtest.html
 ```
 
+## Batch MA Experiments
+
+The experiment runner executes a hardcoded MA-strategy research matrix across:
+
+- pairs
+- timeframes
+- MA period sets
+- MA type sets
+- entry types
+- exit profiles
+
+Results are flattened into a single parquet dataset at:
+
+`outputs/experiments/ma_matrix.parquet`
+
+Failed configs are appended to:
+
+`outputs/experiments/failed_runs.jsonl`
+
+Resume is hash-based. Each config is serialized and hashed with SHA-1, then skipped automatically if its hash is already present in the results parquet.
+
+Run the full matrix:
+
+```bash
+python scripts/run_experiments.py \
+  --data-root data/processed
+```
+
+Run a bounded subset for one pair and timeframe:
+
+```bash
+python scripts/run_experiments.py \
+  --data-root data/processed \
+  --pairs EURUSD \
+  --timeframes 1h \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-15 \
+  --max-runs 5
+```
+
+Resume the same subset later:
+
+```bash
+python scripts/run_experiments.py \
+  --data-root data/processed \
+  --pairs EURUSD \
+  --timeframes 1h \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-15 \
+  --max-runs 5
+```
+
+The second run will skip hashes already saved in `ma_matrix.parquet` and continue with the next pending configs rather than rerunning completed ones.
+
 ## Notes
 
 - The audit note at `docs/research/phase1_bootstrap_and_data_audit.md` is generated from the reusable audit script.
