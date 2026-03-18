@@ -20,6 +20,12 @@ def make_results_frame() -> pd.DataFrame:
         [
             {
                 "strategy": "a",
+                "pair": "EURUSD",
+                "timeframe": "1h",
+                "entry_type": "crossover",
+                "ma_types": "wma,sma",
+                "ma_periods": "25,50",
+                "exit_profile": "none",
                 "total_trades": 250,
                 "profit_factor": 1.50,
                 "max_drawdown": -0.10,
@@ -28,6 +34,12 @@ def make_results_frame() -> pd.DataFrame:
             },
             {
                 "strategy": "b",
+                "pair": "GBPUSD",
+                "timeframe": "4h",
+                "entry_type": "crossover_breakout",
+                "ma_types": "ema,sma",
+                "ma_periods": "20,50",
+                "exit_profile": "atr",
                 "total_trades": 300,
                 "profit_factor": 1.10,
                 "max_drawdown": -0.20,
@@ -36,6 +48,12 @@ def make_results_frame() -> pd.DataFrame:
             },
             {
                 "strategy": "c",
+                "pair": "EURJPY",
+                "timeframe": "1h",
+                "entry_type": "price_above_all",
+                "ma_types": "sma,sma,sma",
+                "ma_periods": "10,20,50",
+                "exit_profile": "none",
                 "total_trades": 100,
                 "profit_factor": 2.00,
                 "max_drawdown": -0.05,
@@ -44,6 +62,12 @@ def make_results_frame() -> pd.DataFrame:
             },
             {
                 "strategy": "d",
+                "pair": "AUDUSD",
+                "timeframe": "15m",
+                "entry_type": "crossover",
+                "ma_types": "ema,ema",
+                "ma_periods": "10,50",
+                "exit_profile": "fixed",
                 "total_trades": 260,
                 "profit_factor": 0.90,
                 "max_drawdown": -0.08,
@@ -75,6 +99,12 @@ def test_shortlist_supports_fallback_column_names() -> None:
         [
             {
                 "strategy": "fallback",
+                "pair": "EURUSD",
+                "timeframe": "1h",
+                "entry_type": "crossover",
+                "ma_types": "ema,sma",
+                "ma_periods": "20,50",
+                "exit_profile": "none",
                 "trades": 250,
                 "profit_factor": 1.25,
                 "max_drawdown": -0.12,
@@ -98,7 +128,7 @@ def test_shortlist_supports_fallback_column_names() -> None:
 
 
 def test_shortlist_raises_for_missing_required_columns() -> None:
-    df = pd.DataFrame([{"total_trades": 250, "profit_factor": 1.2, "net_pnl": 0.1}])
+    df = pd.DataFrame([{"pair": "EURUSD", "total_trades": 250, "profit_factor": 1.2, "net_pnl": 0.1}])
 
     with pytest.raises(ValueError, match="Missing win rate column"):
         MODULE.shortlist_dataframe(
@@ -119,6 +149,12 @@ def test_load_results_falls_back_for_partitioned_dataset(tmp_path: Path) -> None
         [
             {
                 "strategy": "a",
+                "pair": "EURUSD",
+                "timeframe": "1h",
+                "entry_type": "crossover",
+                "ma_types": "ema,ema",
+                "ma_periods": "10,50",
+                "exit_profile": "none",
                 "total_trades": 250,
                 "profit_factor": 1.50,
                 "max_drawdown": -0.10,
@@ -132,6 +168,12 @@ def test_load_results_falls_back_for_partitioned_dataset(tmp_path: Path) -> None
         [
             {
                 "strategy": "b",
+                "pair": "GBPUSD",
+                "timeframe": "1h",
+                "entry_type": "crossover_breakout",
+                "ma_types": "wma,sma",
+                "ma_periods": "25,50",
+                "exit_profile": "atr",
                 "total_trades": 260,
                 "profit_factor": 1.20,
                 "max_drawdown": -0.15,
@@ -168,8 +210,30 @@ def test_print_only_does_not_write_output(tmp_path: Path, monkeypatch: pytest.Mo
     MODULE.main()
 
     captured = capsys.readouterr()
-    assert "strategy" in captured.out
+    assert "summary" in captured.out
+    assert "EURUSD 1h crossover wma/sma 25/50 exit=none" in captured.out
     assert not output_path.exists()
+
+
+def test_build_display_frame_reduces_and_formats_output() -> None:
+    shortlist = MODULE.shortlist_dataframe(
+        make_results_frame(),
+        top=10,
+        min_trades=200,
+        min_profit_factor=1.03,
+        max_drawdown=0.35,
+        min_win_rate=0.30,
+        sort_by="profit_factor",
+    )
+
+    display = MODULE.build_display_frame(shortlist)
+
+    assert list(display.columns) == MODULE.DISPLAY_COLUMNS
+    assert display.loc[0, "summary"] == "EURUSD 1h crossover wma/sma 25/50 exit=none"
+    assert display.loc[0, "trades"] == 250
+    assert display.loc[0, "win_rate"] == 45.0
+    assert display.loc[0, "profit_factor"] == 1.5
+    assert display.loc[0, "rd_ratio"] == 2.0
 
 
 def test_output_file_is_created_when_requested(tmp_path: Path) -> None:

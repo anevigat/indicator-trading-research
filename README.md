@@ -764,6 +764,8 @@ Filters currently supported:
 
 If you pass `--print-only`, the script prints the shortlist and does not write files. If you omit `--output`, it also defaults to print-only behavior.
 
+The terminal output is intentionally compact: each row starts with a summary such as `EURUSD 1h crossover wma/sma 25/50 exit=none`, followed by a small metric set for fast review in the shell.
+
 Print the top 20 rows without writing files:
 
 ```bash
