@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -126,3 +127,21 @@ def test_append_failed_run_writes_timestamp_and_config(tmp_path: Path) -> None:
 def test_normalize_selection_supports_case_insensitive_pairs_and_exact_timeframes() -> None:
     assert MODULE.normalize_selection(["eurusd", "USDJPY"], MODULE.PAIRS) == ["EURUSD", "USDJPY"]
     assert MODULE.normalize_selection(["1h", "4h"], MODULE.TIMEFRAMES) == ["1h", "4h"]
+
+
+def test_parse_args_defaults_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiments.py",
+            "--pairs",
+            "EURUSD",
+            "--timeframes",
+            "1h",
+        ],
+    )
+
+    args = MODULE.parse_args()
+
+    assert args.data_root == "data/processed"

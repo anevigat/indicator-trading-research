@@ -219,7 +219,11 @@ RESULT_COLUMNS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", required=True, help="Root processed data directory.")
+    parser.add_argument(
+        "--data-root",
+        default="data/processed",
+        help="Root processed data directory. Defaults to data/processed.",
+    )
     parser.add_argument("--output-root", default="outputs/backtests", help="Root directory for saved backtest outputs.")
     parser.add_argument(
         "--output-path",
