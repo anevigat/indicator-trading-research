@@ -347,6 +347,10 @@ def experiment_hash(config: dict[str, Any], version: str) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _has_entry_time_stop_provider(config: dict[str, Any]) -> bool:
+    return config.get("stop_loss") is not None or bool(config.get("ma_stop"))
+
+
 def build_experiment_config(
     *,
     pair: str,
@@ -418,6 +422,9 @@ def build_experiment_config(
         "strategy": config["strategy"],
         "initial_capital": config["initial_capital"],
         "fixed_position_size": config["fixed_position_size"],
+        "position_sizing_mode": config.get("position_sizing_mode", "fixed"),
+        "risk_percent": config.get("risk_percent"),
+        "account_currency": config.get("account_currency", "USD"),
         "spread": config["spread"],
         "slippage": config["slippage"],
         "fee_per_trade": config["fee_per_trade"],
@@ -467,7 +474,7 @@ def iter_experiment_configs(
                         for exit_profile in exit_profiles:
                             if exit_profile in {"atr_trailing", "atr_trailing_be"}:
                                 for trailing_type in sorted(TRAILING_TYPES):
-                                    yield build_experiment_config(
+                                    config = build_experiment_config(
                                         pair=pair,
                                         timeframe=timeframe,
                                         ma_types=ma_types,
@@ -479,8 +486,11 @@ def iter_experiment_configs(
                                         end_date=end_date,
                                         experiment_version=experiment_version,
                                     )
+                                    if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                        continue
+                                    yield config
                             else:
-                                yield build_experiment_config(
+                                config = build_experiment_config(
                                     pair=pair,
                                     timeframe=timeframe,
                                     ma_types=ma_types,
@@ -492,6 +502,9 @@ def iter_experiment_configs(
                                     end_date=end_date,
                                     experiment_version=experiment_version,
                                 )
+                                if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                    continue
+                                yield config
             for ma_periods in sorted(MA_PERIODS_3):
                 for ma_types in sorted(MA_TYPES_3):
                     for entry_type in sorted(ENTRY_TYPES_3):
@@ -500,7 +513,7 @@ def iter_experiment_configs(
                         for exit_profile in exit_profiles:
                             if exit_profile in {"atr_trailing", "atr_trailing_be"}:
                                 for trailing_type in sorted(TRAILING_TYPES):
-                                    yield build_experiment_config(
+                                    config = build_experiment_config(
                                         pair=pair,
                                         timeframe=timeframe,
                                         ma_types=ma_types,
@@ -512,8 +525,11 @@ def iter_experiment_configs(
                                         end_date=end_date,
                                         experiment_version=experiment_version,
                                     )
+                                    if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                        continue
+                                    yield config
                             else:
-                                yield build_experiment_config(
+                                config = build_experiment_config(
                                     pair=pair,
                                     timeframe=timeframe,
                                     ma_types=ma_types,
@@ -525,6 +541,9 @@ def iter_experiment_configs(
                                     end_date=end_date,
                                     experiment_version=experiment_version,
                                 )
+                                if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                    continue
+                                yield config
 
 
 def remove_output_path(path: Path) -> None:
@@ -557,6 +576,23 @@ def load_completed_hashes(output_path: Path) -> set[str]:
         return set()
     table = dataset.to_table(columns=["config_hash"])
     return set(table.column("config_hash").to_pylist())
+
+
+def load_failed_hashes(failed_log_path: Path) -> set[str]:
+    if not failed_log_path.exists():
+        return set()
+    hashes: set[str] = set()
+    for line in failed_log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        config_hash = payload.get("config_hash")
+        if isinstance(config_hash, str) and config_hash:
+            hashes.add(config_hash)
+    return hashes
 
 
 def next_part_index(output_path: Path) -> int:
@@ -734,8 +770,6 @@ def main() -> None:
     if args.overwrite_results:
         remove_output_path(output_path)
 
-    completed_hashes = load_completed_hashes(output_path)
-
     experiments = list(
         iter_experiment_configs(
             pairs=pairs,
@@ -746,12 +780,16 @@ def main() -> None:
             experiment_version=args.experiment_version,
         )
     )
-    pending = [experiment for experiment in experiments if experiment["config_hash"] not in completed_hashes]
+    experiment_hashes = {experiment["config_hash"] for experiment in experiments}
+    completed_hashes = load_completed_hashes(output_path) & experiment_hashes
+    failed_hashes = load_failed_hashes(failed_log_path) & experiment_hashes
+    attempted_hashes = completed_hashes | failed_hashes
+    pending = [experiment for experiment in experiments if experiment["config_hash"] not in attempted_hashes]
     if args.max_runs is not None:
         pending = pending[: args.max_runs]
 
     print(
-        f"Experiment matrix: total={len(experiments)} completed={len(completed_hashes)} pending={len(pending)} "
+        f"Experiment matrix: total={len(experiments)} completed={len(completed_hashes)} failed={len(failed_hashes)} pending={len(pending)} "
         f"output={output_path} version={args.experiment_version}"
     )
     if not pending:
