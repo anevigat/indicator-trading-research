@@ -278,7 +278,9 @@ What exists now:
 
 - minimal reusable backtest contracts under `indicator_trading_research.backtest`
 - one reusable strategy interface under `indicator_trading_research.strategies`
-- one reference strategy: `sma_crossover`
+- supported strategies:
+  `sma_crossover`
+  `ma_strategy`
 - standardized backtest outputs that can be visualized with the existing candle overlay tooling
 
 Execution assumptions:
@@ -288,6 +290,9 @@ Execution assumptions:
 - only one open position is supported at a time in v1
 - long and short entries use the next bar open adjusted by configured spread and slippage
 - opposite signals exit on the next bar open and can flip into the new direction on that same open
+- `ma_strategy` supports `sma` and `ema`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
+- `crossover` currently supports exactly 2 moving averages
+- `ma_strategy` sorts MA definitions by period internally, then exposes `ma_1..ma_3` plus `ma_fast` and `ma_slow`
 - stop-loss and take-profit support `absolute` and `atr` modes
 - optional trailing stop support exists in Phase T1 with `absolute` and `atr` modes
 - Phase T2 adds `chandelier` trailing and optional break-even stop support
@@ -345,6 +350,26 @@ python scripts/run_backtest.py \
   --end-date 2025-02-15 \
   --short-window 20 \
   --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --output-root outputs/backtests
+```
+
+Run the generic MA strategy with EMA/SMA inputs and `crossover_breakout` entry logic:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy ma_strategy \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --ma-types ema,sma,sma \
+  --ma-periods 10,20,50 \
+  --entry-type crossover_breakout \
   --initial-capital 10000 \
   --fixed-position-size 1 \
   --spread 0.0001 \
@@ -578,7 +603,7 @@ python scripts/run_backtest.py \
   --output-root outputs/backtests
 ```
 
-The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `break_even`, `ma_stop`, `trailing_stop`, `chandelier_trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, `trailing_stop_final`, `break_even_stop_price`, and `ma_stop_final`. It stays compatible with the existing candle overlay CLI.
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `break_even`, `ma_stop`, `trailing_stop`, `chandelier_trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, `trailing_stop_final`, `break_even_stop_price`, and `ma_stop_final`. It stays compatible with the existing candle overlay CLI for both `sma_crossover` and `ma_strategy` runs.
 
 Visualize the resulting trades on candles:
 

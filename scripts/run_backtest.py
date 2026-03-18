@@ -18,7 +18,24 @@ from indicator_trading_research.backtest import (  # noqa: E402
     run_backtest,
     save_backtest_result,
 )
-from indicator_trading_research.strategies import SMACrossoverStrategy  # noqa: E402
+from indicator_trading_research.strategies import MAStrategy, SMACrossoverStrategy  # noqa: E402
+
+
+def _parse_csv_list(raw_value: str | None, *, name: str) -> list[str]:
+    if raw_value is None:
+        raise ValueError(f"{name} is required for this strategy.")
+    values = [item.strip() for item in raw_value.split(",") if item.strip()]
+    if not values:
+        raise ValueError(f"{name} must contain at least one value.")
+    return values
+
+
+def _parse_csv_ints(raw_value: str | None, *, name: str) -> list[int]:
+    values = _parse_csv_list(raw_value, name=name)
+    try:
+        return [int(value) for value in values]
+    except ValueError as exc:
+        raise ValueError(f"{name} must contain comma-separated integers.") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,11 +43,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", required=True, help="Root processed data directory.")
     parser.add_argument("--pair", required=True, help="Pair to backtest, for example EURUSD.")
     parser.add_argument("--timeframe", required=True, help="Timeframe to backtest, for example 15m.")
-    parser.add_argument("--strategy", required=True, choices=["sma_crossover"], help="Strategy to run.")
+    parser.add_argument("--strategy", required=True, choices=["sma_crossover", "ma_strategy"], help="Strategy to run.")
     parser.add_argument("--start-date", required=True, help="UTC start date.")
     parser.add_argument("--end-date", required=True, help="UTC end date.")
-    parser.add_argument("--short-window", type=int, required=True, help="Short SMA window.")
-    parser.add_argument("--long-window", type=int, required=True, help="Long SMA window.")
+    parser.add_argument("--short-window", type=int, default=None, help="Short SMA window for sma_crossover.")
+    parser.add_argument("--long-window", type=int, default=None, help="Long SMA window for sma_crossover.")
+    parser.add_argument("--ma-types", default=None, help="Comma-separated MA types for ma_strategy, for example sma,sma or ema,sma,sma.")
+    parser.add_argument("--ma-periods", default=None, help="Comma-separated MA periods for ma_strategy, for example 20,50 or 10,20,50.")
+    parser.add_argument("--entry-type", choices=["crossover", "price_above_all", "crossover_breakout"], default=None, help="Entry mode for ma_strategy.")
     parser.add_argument("--initial-capital", type=float, required=True, help="Initial capital.")
     parser.add_argument("--fixed-position-size", type=float, required=True, help="Fixed position size.")
     parser.add_argument("--spread", type=float, default=0.0, help="Absolute spread in price units.")
@@ -79,12 +99,35 @@ def main() -> None:
         )
 
         if args.strategy == "sma_crossover":
+            if args.short_window is None or args.long_window is None:
+                raise ValueError("sma_crossover requires --short-window and --long-window.")
             strategy = SMACrossoverStrategy(
                 short_window=args.short_window,
                 long_window=args.long_window,
                 allow_long=args.allow_long,
                 allow_short=args.allow_short,
             )
+            strategy_params = {
+                "short_window": args.short_window,
+                "long_window": args.long_window,
+            }
+        elif args.strategy == "ma_strategy":
+            ma_types = _parse_csv_list(args.ma_types, name="ma_types")
+            ma_periods = _parse_csv_ints(args.ma_periods, name="ma_periods")
+            if args.entry_type is None:
+                raise ValueError("ma_strategy requires --entry-type.")
+            strategy = MAStrategy(
+                ma_types=ma_types,
+                ma_periods=ma_periods,
+                entry_type=args.entry_type,
+                allow_long=args.allow_long,
+                allow_short=args.allow_short,
+            )
+            strategy_params = {
+                "ma_types": ma_types,
+                "ma_periods": ma_periods,
+                "entry_type": args.entry_type,
+            }
         else:
             raise ValueError(f"Unsupported strategy: {args.strategy}")
 
@@ -97,10 +140,7 @@ def main() -> None:
             end_date=args.end_date,
             initial_capital=args.initial_capital,
             fixed_position_size=args.fixed_position_size,
-            strategy_params={
-                "short_window": args.short_window,
-                "long_window": args.long_window,
-            },
+            strategy_params=strategy_params,
             spread=args.spread,
             slippage=args.slippage,
             fee_per_trade=args.fee_per_trade,

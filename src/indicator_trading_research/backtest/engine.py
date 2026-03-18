@@ -359,8 +359,19 @@ def _break_even_distance(position: OpenPosition, config: BacktestConfig, *, for_
     return None
 
 
-def _ma_stop_column(config: BacktestConfig) -> str:
-    return "short_sma" if config.ma_stop_source == "short" else "long_sma"
+def _ma_stop_columns(config: BacktestConfig) -> tuple[str, str]:
+    if config.ma_stop_source == "short":
+        return "short_sma", "ma_fast"
+    return "long_sma", "ma_slow"
+
+
+def _ma_stop_value(signal_row: pd.Series, config: BacktestConfig) -> float | None:
+    for column in _ma_stop_columns(config):
+        if column in signal_row.index:
+            value = signal_row.get(column)
+            if pd.notna(value):
+                return float(value)
+    return None
 
 
 def _ma_stop_buffer_distance(config: BacktestConfig, current_atr: float | None) -> float | None:
@@ -564,13 +575,15 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
     signal_frame["signal"] = signal_frame["signal"].fillna(0).astype(int)
 
     if config.ma_stop:
-        ma_column = _ma_stop_column(config)
-        if ma_column not in signal_frame.columns:
+        preferred_column, fallback_column = _ma_stop_columns(config)
+        if preferred_column not in signal_frame.columns and fallback_column not in signal_frame.columns:
             raise ValueError(
-                f"ma_stop requires strategy signals to include '{ma_column}' for source '{config.ma_stop_source}'."
+                "ma_stop requires strategy signals to include "
+                f"'{preferred_column}' or '{fallback_column}' for source '{config.ma_stop_source}'."
             )
     else:
-        ma_column = None
+        preferred_column = None
+        fallback_column = None
 
     realized_equity = float(config.initial_capital)
     equity_rows: list[dict[str, object]] = []
@@ -602,11 +615,8 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             atr_at_signal = None
             if atr_series is not None:
                 atr_at_signal = float(atr_series.iloc[index - 1]) if pd.notna(atr_series.iloc[index - 1]) else None
-            ma_at_signal = None
-            if ma_column is not None:
-                ma_raw = previous_signal_row.get(ma_column)
-                ma_at_signal = float(ma_raw) if pd.notna(ma_raw) else None
-            if (not requires_atr_at_entry or atr_at_signal is not None) and (ma_column is None or ma_at_signal is not None):
+            ma_at_signal = _ma_stop_value(previous_signal_row, config) if preferred_column is not None else None
+            if (not requires_atr_at_entry or atr_at_signal is not None) and (preferred_column is None or ma_at_signal is not None):
                 side = "long" if can_enter_long else "short"
                 trade_counter += 1
                 entry_price = _execution_price(side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=True)
@@ -647,10 +657,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 _update_extrema(position, current_bar)
                 _update_break_even_stop(position, current_bar, config)
                 current_atr = float(atr_series.iloc[index]) if atr_series is not None and pd.notna(atr_series.iloc[index]) else None
-                current_ma = None
-                if ma_column is not None:
-                    ma_raw = current_signal_row.get(ma_column)
-                    current_ma = float(ma_raw) if pd.notna(ma_raw) else None
+                current_ma = _ma_stop_value(current_signal_row, config) if preferred_column is not None else None
                 _update_ma_stop(position, current_ma, config, current_atr=current_atr)
                 chandelier_atr = (
                     float(chandelier_atr_series.iloc[index])

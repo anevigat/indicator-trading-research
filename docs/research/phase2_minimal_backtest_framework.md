@@ -14,7 +14,9 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - optional spread, slippage, and flat fee assumptions
 - optional stop-loss / take-profit hooks in the config contract
 - deterministic outputs saved to a standardized run folder
-- one complete reference strategy: `sma_crossover`
+- supported strategies:
+  `sma_crossover`
+  `ma_strategy`
 
 ## Explicit Assumptions
 
@@ -25,6 +27,9 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - long exits sell at `exit_price - spread/2 - slippage`
 - short entries sell at `next_open - spread/2 - slippage`
 - short exits buy at `exit_price + spread/2 + slippage`
+- `ma_strategy` supports `sma` and `ema`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
+- `entry_type='crossover'` currently supports exactly 2 moving averages
+- MA definitions are sorted by period internally; the strategy output includes `ma_1..ma_3` plus `ma_fast` and `ma_slow`
 - stop-loss and take-profit support two modes: `absolute` and `atr`
 - `absolute` means a fixed price distance from the adjusted entry price
 - `atr` means a multiple of ATR from the signal bar close, then frozen at entry for the life of the trade
@@ -95,7 +100,7 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 
 When ATR mode is used, `trades.parquet` also includes `atr_at_entry`.
 
-Phase T1 trailing adds these optional output fields:
+Current exit layers add these optional output fields:
 
 - `trailing_stop_initial`
 - `trailing_stop_final`
@@ -112,7 +117,7 @@ Phase T1 trailing adds these optional output fields:
 
 ## Limitations
 
-- only one strategy is implemented in Phase 2
+- only two basic MA-family strategies are implemented in Phase 2
 - there is no optimization, walk-forward, or sweep framework yet
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
