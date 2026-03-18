@@ -33,9 +33,20 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - for a long trade, `stop_loss` is placed below entry and `take_profit` is placed above entry
 - for a short trade, `stop_loss` is placed above entry and `take_profit` is placed below entry
 - mixed modes are supported, for example ATR stop with absolute target or absolute stop with ATR target
+- optional trailing stop support exists in Phase T1
+- trailing stop supports two modes: `absolute` and `atr`
+- trailing stop updates use close-only ratcheting after hit checks, so any newly tightened trail applies from the next bar onward
+- long trailing update: `max(previous_trailing_stop, close - distance)`
+- short trailing update: `min(previous_trailing_stop, close + distance)`
+- if no activation threshold is configured, trailing becomes active immediately after entry
+- if activation is configured, the engine checks activation using current bar range and then updates the trail after hit checks
+- `trailing_activation_mode=atr` uses `atr_at_entry` as the activation reference
+- `trailing_stop_mode=atr` uses live ATR on each update bar when ATR is available
+- if ATR is unavailable for ATR-based trailing updates, the trade stays open and trailing simply does not update on that bar
 - intrabar stop-loss and take-profit checks are evaluated on the bar after entry has been established, including the entry bar itself
-- if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped and no trade is opened
-- if both stop-loss and take-profit are touched in the same bar, the engine uses the conservative deterministic rule: stop-loss is assumed to trigger first
+- if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped only when an entry-time ATR-dependent protection requires `atr_at_entry`
+- the effective stop is the tighter of static stop-loss and trailing stop
+- if both stop-side and take-profit are touched in the same bar, the engine uses the conservative deterministic rule: the active stop side is assumed to trigger first
 - if a position is still open at the end of the data window, it is closed on the final bar close using the configured execution adjustments
 
 ## Output Contracts
@@ -58,10 +69,17 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 
 - `signal_exit`
 - `stop_loss`
+- `trailing_stop`
 - `take_profit`
 - `forced_end`
 
 When ATR mode is used, `trades.parquet` also includes `atr_at_entry`.
+
+Phase T1 trailing adds these optional output fields:
+
+- `trailing_stop_initial`
+- `trailing_stop_final`
+- `trailing_stop_exit_hit`
 
 ## Connection To The Visualization Framework
 
@@ -73,14 +91,15 @@ When ATR mode is used, `trades.parquet` also includes `atr_at_entry`.
 - there is no optimization, walk-forward, or sweep framework yet
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
-- ATR is frozen at entry; there is no ATR trailing-stop logic in Phase A
+- trailing stop updates are close-only in Phase T1
+- there is no chandelier, stepped, break-even, or trailing-take-profit logic
 - there is no higher-timeframe ATR support
 - equity is tracked with realized equity plus close-based mark-to-market for an open position
 
 ## Next Recommended Extensions
 
 - add more reference strategies behind the same signal contract
-- add ATR trailing and other dynamic exit models only after the frozen-ATR baseline is stable
+- add richer trailing variants only after the close-only baseline is stable
 - add richer position sizing modes
 - add parameter sweep tooling and experiment summaries
 - add walk-forward evaluation and regime segmentation

@@ -39,6 +39,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--take-profit", type=float, default=None, help="Take-profit distance or ATR multiple, depending on take-profit mode.")
     parser.add_argument("--stop-loss-mode", choices=["absolute", "atr"], default=None, help="Stop-loss mode.")
     parser.add_argument("--take-profit-mode", choices=["absolute", "atr"], default=None, help="Take-profit mode.")
+    parser.add_argument("--trailing-stop", type=float, default=None, help="Trailing-stop distance or ATR multiple, depending on trailing-stop mode.")
+    parser.add_argument("--trailing-stop-mode", choices=["absolute", "atr"], default=None, help="Trailing-stop mode.")
+    parser.add_argument("--trailing-activation", type=float, default=None, help="Optional activation threshold for trailing stop.")
+    parser.add_argument("--trailing-activation-mode", choices=["absolute", "atr"], default=None, help="Trailing-stop activation mode.")
     parser.add_argument("--atr-period", type=int, default=14, help="ATR period used when any protection mode is 'atr'.")
     parser.add_argument("--atr-method", choices=["wilder", "sma", "ema"], default="wilder", help="ATR smoothing method.")
     parser.add_argument("--output-root", required=True, help="Root directory for saved backtest outputs.")
@@ -94,6 +98,10 @@ def main() -> None:
             stop_loss=args.stop_loss,
             take_profit_mode=args.take_profit_mode if args.take_profit is not None else None,
             take_profit=args.take_profit,
+            trailing_stop_mode=args.trailing_stop_mode if args.trailing_stop is not None else None,
+            trailing_stop=args.trailing_stop,
+            trailing_activation_mode=args.trailing_activation_mode if args.trailing_activation is not None else None,
+            trailing_activation=args.trailing_activation,
             atr_period=args.atr_period,
             atr_method=args.atr_method,
         )
@@ -115,8 +123,12 @@ def main() -> None:
         f"take_profit={config.take_profit} "
         f"stop_loss_mode={config.stop_loss_mode} "
         f"take_profit_mode={config.take_profit_mode} "
-        f"atr_period={config.atr_period if config.stop_loss_mode == 'atr' or config.take_profit_mode == 'atr' else 'n/a'} "
-        f"atr_method={config.atr_method if config.stop_loss_mode == 'atr' or config.take_profit_mode == 'atr' else 'n/a'} "
+        f"trailing_stop={config.trailing_stop} "
+        f"trailing_stop_mode={config.trailing_stop_mode} "
+        f"trailing_activation={config.trailing_activation} "
+        f"trailing_activation_mode={config.trailing_activation_mode} "
+        f"atr_period={config.atr_period if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode)) else 'n/a'} "
+        f"atr_method={config.atr_method if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode)) else 'n/a'} "
         f"output={output_path}"
     )
 

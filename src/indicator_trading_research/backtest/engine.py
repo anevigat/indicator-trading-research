@@ -10,7 +10,11 @@ Execution rules are intentionally explicit:
 - ATR-based thresholds use ATR from the signal bar close, then freeze that value
   at entry for the life of the trade
 - if ATR is unavailable on the signal bar because warmup is incomplete, the signal
-  is skipped and no trade is opened
+  is skipped only when entry-time ATR-dependent protections require it
+- trailing stop updates use close-only ratcheting and are applied after current-bar
+  hit checks, so a newly tightened trail only applies from the next bar onward
+- ATR-based trailing distance uses live ATR on each bar when available
+- ATR-based trailing activation uses ATR at entry when available
 - if both stop-loss and take-profit are touched within the same bar, the engine
   assumes stop-loss triggers first
 - an open trade at the end of the data is forced flat on the final bar close
@@ -40,6 +44,9 @@ class OpenPosition:
     stop_loss: float | None
     take_profit: float | None
     atr_at_entry: float | None
+    trailing_active: bool
+    trailing_stop_price: float | None
+    trailing_stop_initial: float | None
     size: float
     strategy_name: str
     entry_bar_index: int
@@ -84,41 +91,79 @@ def _validate_config(config: BacktestConfig) -> None:
 
     config.stop_loss_mode = _normalize_protection_mode("stop_loss", config.stop_loss_mode, config.stop_loss)
     config.take_profit_mode = _normalize_protection_mode("take_profit", config.take_profit_mode, config.take_profit)
+    config.trailing_stop_mode = _normalize_protection_mode("trailing_stop", config.trailing_stop_mode, config.trailing_stop)
+    config.trailing_activation_mode = _normalize_protection_mode("trailing_activation", config.trailing_activation_mode, config.trailing_activation)
+    if config.trailing_activation is not None and config.trailing_stop is None:
+        raise ValueError("trailing_activation requires trailing_stop to be set.")
     if not isinstance(config.atr_period, int) or config.atr_period <= 0:
         raise ValueError("atr_period must be a positive integer.")
     config.atr_method = config.atr_method.strip().lower()
     if config.atr_method not in SUPPORTED_ATR_METHODS:
         supported = ", ".join(sorted(SUPPORTED_ATR_METHODS))
         raise ValueError(f"Unsupported atr_method: {config.atr_method!r}. Supported methods: {supported}.")
-    if config.stop_loss_mode == "atr" or config.take_profit_mode == "atr":
+    uses_atr = any(
+        mode == "atr"
+        for mode in (
+            config.stop_loss_mode,
+            config.take_profit_mode,
+            config.trailing_stop_mode,
+            config.trailing_activation_mode,
+        )
+    )
+    if uses_atr:
         if config.stop_loss_mode == "atr" and config.stop_loss is None:
             raise ValueError("stop_loss_mode='atr' requires stop_loss to be set.")
         if config.take_profit_mode == "atr" and config.take_profit is None:
             raise ValueError("take_profit_mode='atr' requires take_profit to be set.")
+        if config.trailing_stop_mode == "atr" and config.trailing_stop is None:
+            raise ValueError("trailing_stop_mode='atr' requires trailing_stop to be set.")
+        if config.trailing_activation_mode == "atr" and config.trailing_activation is None:
+            raise ValueError("trailing_activation_mode='atr' requires trailing_activation to be set.")
+
+
+def _effective_stop(position: OpenPosition) -> tuple[float | None, str | None]:
+    static_stop = position.stop_loss
+    trailing_stop = position.trailing_stop_price
+    if static_stop is None and trailing_stop is None:
+        return None, None
+    if static_stop is None:
+        return trailing_stop, "trailing_stop"
+    if trailing_stop is None:
+        return static_stop, "stop_loss"
+
+    if position.side == "long":
+        if trailing_stop > static_stop:
+            return trailing_stop, "trailing_stop"
+        return static_stop, "stop_loss"
+
+    if trailing_stop < static_stop:
+        return trailing_stop, "trailing_stop"
+    return static_stop, "stop_loss"
 
 
 def _resolve_exit_from_bar(position: OpenPosition, bar: pd.Series) -> tuple[float, str] | None:
-    if position.stop_loss is None and position.take_profit is None:
+    effective_stop, stop_reason = _effective_stop(position)
+    if effective_stop is None and position.take_profit is None:
         return None
 
     low = float(bar["low"])
     high = float(bar["high"])
     if position.side == "long":
-        stop_hit = position.stop_loss is not None and low <= position.stop_loss
+        stop_hit = effective_stop is not None and low <= effective_stop
         take_hit = position.take_profit is not None and high >= position.take_profit
         if stop_hit and take_hit:
-            return position.stop_loss, "stop_loss"
+            return effective_stop, stop_reason or "stop_loss"
         if stop_hit:
-            return position.stop_loss, "stop_loss"
+            return effective_stop, stop_reason or "stop_loss"
         if take_hit:
             return position.take_profit, "take_profit"
     else:
-        stop_hit = position.stop_loss is not None and high >= position.stop_loss
+        stop_hit = effective_stop is not None and high >= effective_stop
         take_hit = position.take_profit is not None and low <= position.take_profit
         if stop_hit and take_hit:
-            return position.stop_loss, "stop_loss"
+            return effective_stop, stop_reason or "stop_loss"
         if stop_hit:
-            return position.stop_loss, "stop_loss"
+            return effective_stop, stop_reason or "stop_loss"
         if take_hit:
             return position.take_profit, "take_profit"
     return None
@@ -155,6 +200,75 @@ def _build_stop_take_profit(entry_price: float, side: str, config: BacktestConfi
     return stop_loss, take_profit
 
 
+def _trailing_activation_distance(position: OpenPosition, config: BacktestConfig) -> float | None:
+    if config.trailing_activation is None:
+        return None
+    if config.trailing_activation_mode == "absolute":
+        return config.trailing_activation
+    if config.trailing_activation_mode == "atr":
+        if position.atr_at_entry is None or pd.isna(position.atr_at_entry):
+            return None
+        return config.trailing_activation * position.atr_at_entry
+    return None
+
+
+def _should_activate_trailing(position: OpenPosition, bar: pd.Series, config: BacktestConfig) -> bool:
+    if config.trailing_stop is None or position.trailing_active:
+        return position.trailing_active
+    if config.trailing_activation is None:
+        return True
+
+    activation_distance = _trailing_activation_distance(position, config)
+    if activation_distance is None:
+        return False
+
+    if position.side == "long":
+        return float(bar["high"]) >= position.entry_price + activation_distance
+    return float(bar["low"]) <= position.entry_price - activation_distance
+
+
+def _trailing_distance(config: BacktestConfig, current_atr: float | None) -> float | None:
+    if config.trailing_stop is None:
+        return None
+    if config.trailing_stop_mode == "absolute":
+        return config.trailing_stop
+    if config.trailing_stop_mode == "atr":
+        if current_atr is None or pd.isna(current_atr):
+            return None
+        return config.trailing_stop * current_atr
+    return None
+
+
+def _update_trailing_stop(position: OpenPosition, bar: pd.Series, config: BacktestConfig, *, current_atr: float | None) -> None:
+    if config.trailing_stop is None:
+        return
+
+    if not position.trailing_active:
+        position.trailing_active = _should_activate_trailing(position, bar, config)
+    if not position.trailing_active:
+        return
+
+    distance = _trailing_distance(config, current_atr)
+    if distance is None:
+        return
+
+    close_price = float(bar["close"])
+    if position.side == "long":
+        candidate = close_price - distance
+        if position.trailing_stop_price is None:
+            position.trailing_stop_price = candidate
+            position.trailing_stop_initial = candidate
+        else:
+            position.trailing_stop_price = max(position.trailing_stop_price, candidate)
+    else:
+        candidate = close_price + distance
+        if position.trailing_stop_price is None:
+            position.trailing_stop_price = candidate
+            position.trailing_stop_initial = candidate
+        else:
+            position.trailing_stop_price = min(position.trailing_stop_price, candidate)
+
+
 def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price: float, exit_reason: str, config: BacktestConfig, exit_bar_index: int) -> TradeRecord:
     gross_pnl, net_pnl = _compute_trade_pnl(position.side, position.entry_price, exit_price, position.size, config.fee_per_trade)
     outcome = "win" if net_pnl > 0 else "loss" if net_pnl < 0 else "breakeven"
@@ -175,6 +289,9 @@ def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price:
         strategy_name=config.strategy_name,
         notes=None,
         atr_at_entry=position.atr_at_entry,
+        trailing_stop_initial=position.trailing_stop_initial,
+        trailing_stop_final=position.trailing_stop_price,
+        trailing_stop_exit_hit=exit_reason == "trailing_stop",
         exit_reason=exit_reason,
         duration_bars=exit_bar_index - position.entry_bar_index,
         gross_pnl=gross_pnl,
@@ -188,8 +305,24 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
     if len(candles) < 2:
         raise ValueError("Need at least two bars for next-bar execution.")
     _validate_config(config)
-    needs_atr = config.stop_loss_mode == "atr" or config.take_profit_mode == "atr"
+    needs_atr = any(
+        mode == "atr"
+        for mode in (
+            config.stop_loss_mode,
+            config.take_profit_mode,
+            config.trailing_stop_mode,
+            config.trailing_activation_mode,
+        )
+    )
     atr_series = compute_atr(candles, period=config.atr_period, method=config.atr_method) if needs_atr else None
+    requires_atr_at_entry = any(
+        mode == "atr"
+        for mode in (
+            config.stop_loss_mode,
+            config.take_profit_mode,
+            config.trailing_activation_mode,
+        )
+    )
 
     signal_frame = signals.copy()
     signal_frame["timestamp"] = pd.to_datetime(signal_frame["timestamp"], utc=True)
@@ -229,7 +362,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             atr_at_signal = None
             if atr_series is not None:
                 atr_at_signal = float(atr_series.iloc[index - 1]) if pd.notna(atr_series.iloc[index - 1]) else None
-            if atr_series is None or atr_at_signal is not None:
+            if not requires_atr_at_entry or atr_at_signal is not None:
                 side = "long" if can_enter_long else "short"
                 trade_counter += 1
                 entry_price = _execution_price(side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=True)
@@ -242,6 +375,9 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     atr_at_entry=atr_at_signal,
+                    trailing_active=config.trailing_stop is not None and config.trailing_activation is None,
+                    trailing_stop_price=None,
+                    trailing_stop_initial=None,
                     size=config.fixed_position_size,
                     strategy_name=config.strategy_name,
                     entry_bar_index=index,
@@ -256,6 +392,9 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 trades.append(trade)
                 realized_equity += float(trade.net_pnl or 0.0)
                 position = None
+            else:
+                current_atr = float(atr_series.iloc[index]) if atr_series is not None and pd.notna(atr_series.iloc[index]) else None
+                _update_trailing_stop(position, current_bar, config, current_atr=current_atr)
 
         mark_to_market = realized_equity
         if position is not None:
@@ -306,6 +445,9 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 "strategy_name",
                 "notes",
                 "atr_at_entry",
+                "trailing_stop_initial",
+                "trailing_stop_final",
+                "trailing_stop_exit_hit",
                 "exit_reason",
                 "duration_bars",
                 "gross_pnl",
