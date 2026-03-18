@@ -716,6 +716,43 @@ python scripts/run_experiments.py \
 
 The second run will skip hashes already saved in `ma_matrix.parquet` and continue with the next pending configs rather than rerunning completed ones.
 
+## Shortlisting Experiment Results
+
+The shortlist utility loads experiment results, applies configurable quality filters, sorts the surviving rows, and either prints them directly or saves them for follow-up analysis.
+
+Filters currently supported:
+
+- minimum trades
+- minimum profit factor
+- maximum absolute drawdown
+- minimum win rate
+- configurable sort column
+
+If you pass `--print-only`, the script prints the shortlist and does not write files. If you omit `--output`, it also defaults to print-only behavior.
+
+Print the top 20 rows without writing files:
+
+```bash
+python scripts/shortlist_results.py \
+  --input outputs/experiments/ma_matrix.parquet \
+  --top 20 \
+  --print-only
+```
+
+Save a filtered shortlist to parquet and csv:
+
+```bash
+python scripts/shortlist_results.py \
+  --input outputs/experiments/ma_matrix.parquet \
+  --output outputs/experiments/ma_matrix_shortlist.parquet \
+  --top 50 \
+  --min-trades 200 \
+  --min-profit-factor 1.03 \
+  --max-drawdown 0.35 \
+  --min-win-rate 0.30 \
+  --sort-by profit_factor
+```
+
 ## Notes
 
 - The audit note at `docs/research/phase1_bootstrap_and_data_audit.md` is generated from the reusable audit script.
