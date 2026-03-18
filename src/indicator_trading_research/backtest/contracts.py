@@ -40,6 +40,10 @@ class BacktestConfig:
     break_even: float | None = None
     break_even_buffer_mode: str | None = None
     break_even_buffer: float | None = None
+    ma_stop: bool = False
+    ma_stop_source: str = "short"
+    ma_stop_buffer_mode: str | None = None
+    ma_stop_buffer: float | None = None
     atr_period: int = 14
     atr_method: str = "wilder"
 
@@ -70,6 +74,9 @@ class TradeRecord:
     trailing_stop_exit_hit: bool | None = None
     break_even_stop_price: float | None = None
     break_even_exit_hit: bool | None = None
+    ma_stop_initial: float | None = None
+    ma_stop_final: float | None = None
+    ma_stop_exit_hit: bool | None = None
     exit_reason: str | None = None
     duration_bars: int | None = None
     gross_pnl: float | None = None

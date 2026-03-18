@@ -18,6 +18,11 @@ Execution rules are intentionally explicit:
 - chandelier trailing uses highest-high / lowest-low since entry with live ATR
 - break-even stop activates after hit checks and competes with other stop-side
   protections using the tightest stop on each bar
+- MA stop uses the strategy-provided MA series for the current bar, ratchets only
+  in the favorable direction, and updates after hit checks
+- MA stop requires the selected MA source to be available on the signal bar; if
+  that MA is still warming up, the signal is skipped
+- ATR-buffered MA stop uses live ATR on each update bar when ATR is available
 - if both stop-loss and take-profit are touched within the same bar, the engine
   assumes stop-loss triggers first
 - an open trade at the end of the data is forced flat on the final bar close
@@ -37,6 +42,7 @@ from .metrics import compute_backtest_metrics
 SUPPORTED_PROTECTION_MODES = {"absolute", "atr"}
 SUPPORTED_ATR_METHODS = {"wilder", "sma", "ema"}
 SUPPORTED_TRAILING_TYPES = {"standard", "chandelier"}
+SUPPORTED_MA_STOP_SOURCES = {"short", "long"}
 
 
 @dataclass
@@ -54,6 +60,8 @@ class OpenPosition:
     trailing_stop_reason: str | None
     break_even_active: bool
     break_even_stop_price: float | None
+    ma_stop_price: float | None
+    ma_stop_initial: float | None
     high_since_entry: float
     low_since_entry: float
     size: float
@@ -95,6 +103,14 @@ def _normalize_trailing_type(value: str | None) -> str:
     return normalized
 
 
+def _normalize_ma_stop_source(value: str | None) -> str:
+    normalized = (value or "short").strip().lower()
+    if normalized not in SUPPORTED_MA_STOP_SOURCES:
+        supported = ", ".join(sorted(SUPPORTED_MA_STOP_SOURCES))
+        raise ValueError(f"Unsupported ma_stop_source: {value!r}. Supported sources: {supported}.")
+    return normalized
+
+
 def _validate_atr_settings(period: int, method: str, *, period_name: str, method_name: str) -> str:
     if not isinstance(period, int) or period <= 0:
         raise ValueError(f"{period_name} must be a positive integer.")
@@ -133,6 +149,20 @@ def _validate_config(config: BacktestConfig) -> None:
         config.break_even_buffer,
         allow_zero=True,
     )
+    config.ma_stop_source = _normalize_ma_stop_source(config.ma_stop_source)
+    if config.ma_stop:
+        if config.ma_stop_buffer is None:
+            config.ma_stop_buffer = 0.0
+        config.ma_stop_buffer_mode = _normalize_protection_mode(
+            "ma_stop_buffer",
+            config.ma_stop_buffer_mode,
+            config.ma_stop_buffer,
+            allow_zero=True,
+        )
+    else:
+        if config.ma_stop_buffer is not None or config.ma_stop_buffer_mode is not None:
+            raise ValueError("ma_stop_buffer and ma_stop_buffer_mode require ma_stop to be enabled.")
+        config.ma_stop_buffer_mode = None
 
     has_standard_trailing = config.trailing_type == "standard" and config.trailing_stop is not None
     has_chandelier_trailing = config.trailing_type == "chandelier" and config.chandelier_multiplier is not None
@@ -168,6 +198,7 @@ def _validate_config(config: BacktestConfig) -> None:
             config.trailing_activation_mode,
             config.break_even_mode,
             config.break_even_buffer_mode,
+            config.ma_stop_buffer_mode,
         )
     )
     if uses_atr:
@@ -183,6 +214,8 @@ def _validate_config(config: BacktestConfig) -> None:
             raise ValueError("break_even_mode='atr' requires break_even to be set.")
         if config.break_even_buffer_mode == "atr" and config.break_even_buffer is None:
             raise ValueError("break_even_buffer_mode='atr' requires break_even_buffer to be set.")
+        if config.ma_stop_buffer_mode == "atr" and config.ma_stop_buffer is None:
+            raise ValueError("ma_stop_buffer_mode='atr' requires ma_stop_buffer to be set.")
 
 
 def _effective_stop(position: OpenPosition) -> tuple[float | None, str | None]:
@@ -191,6 +224,8 @@ def _effective_stop(position: OpenPosition) -> tuple[float | None, str | None]:
         candidates.append((position.stop_loss, "stop_loss"))
     if position.break_even_stop_price is not None:
         candidates.append((position.break_even_stop_price, "break_even"))
+    if position.ma_stop_price is not None:
+        candidates.append((position.ma_stop_price, "ma_stop"))
     if position.trailing_stop_price is not None and position.trailing_stop_reason is not None:
         candidates.append((position.trailing_stop_price, position.trailing_stop_reason))
     if not candidates:
@@ -324,6 +359,23 @@ def _break_even_distance(position: OpenPosition, config: BacktestConfig, *, for_
     return None
 
 
+def _ma_stop_column(config: BacktestConfig) -> str:
+    return "short_sma" if config.ma_stop_source == "short" else "long_sma"
+
+
+def _ma_stop_buffer_distance(config: BacktestConfig, current_atr: float | None) -> float | None:
+    value = config.ma_stop_buffer
+    if value is None:
+        return 0.0
+    if config.ma_stop_buffer_mode == "absolute":
+        return value
+    if config.ma_stop_buffer_mode == "atr":
+        if current_atr is None or pd.isna(current_atr):
+            return None
+        return value * current_atr
+    return value
+
+
 def _update_extrema(position: OpenPosition, bar: pd.Series) -> None:
     position.high_since_entry = max(position.high_since_entry, float(bar["high"]))
     position.low_since_entry = min(position.low_since_entry, float(bar["low"]))
@@ -354,6 +406,29 @@ def _update_break_even_stop(position: OpenPosition, bar: pd.Series, config: Back
         position.break_even_stop_price = position.entry_price + buffer_distance
     else:
         position.break_even_stop_price = position.entry_price - buffer_distance
+
+
+def _update_ma_stop(position: OpenPosition, ma_value: float | None, config: BacktestConfig, *, current_atr: float | None) -> None:
+    if not config.ma_stop or ma_value is None or pd.isna(ma_value):
+        return
+
+    buffer_distance = _ma_stop_buffer_distance(config, current_atr)
+    if buffer_distance is None:
+        return
+
+    candidate = ma_value - buffer_distance if position.side == "long" else ma_value + buffer_distance
+    if position.side == "long":
+        if position.ma_stop_price is None:
+            position.ma_stop_price = candidate
+            position.ma_stop_initial = candidate
+        else:
+            position.ma_stop_price = max(position.ma_stop_price, candidate)
+    else:
+        if position.ma_stop_price is None:
+            position.ma_stop_price = candidate
+            position.ma_stop_initial = candidate
+        else:
+            position.ma_stop_price = min(position.ma_stop_price, candidate)
 
 
 def _chandelier_candidate(position: OpenPosition, chandelier_atr: float | None, config: BacktestConfig) -> float | None:
@@ -432,6 +507,9 @@ def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price:
         trailing_stop_exit_hit=exit_reason in {"trailing_stop", "chandelier_trailing_stop"},
         break_even_stop_price=position.break_even_stop_price,
         break_even_exit_hit=exit_reason == "break_even",
+        ma_stop_initial=position.ma_stop_initial,
+        ma_stop_final=position.ma_stop_price,
+        ma_stop_exit_hit=exit_reason == "ma_stop",
         exit_reason=exit_reason,
         duration_bars=exit_bar_index - position.entry_bar_index,
         gross_pnl=gross_pnl,
@@ -454,6 +532,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             config.trailing_activation_mode,
             config.break_even_mode,
             config.break_even_buffer_mode,
+            config.ma_stop_buffer_mode,
         )
     )
     atr_series = compute_atr(candles, period=config.atr_period, method=config.atr_method) if needs_atr else None
@@ -477,7 +556,21 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
     signal_frame = signals.copy()
     signal_frame["timestamp"] = pd.to_datetime(signal_frame["timestamp"], utc=True)
     signal_frame = signal_frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
-    signal_map = signal_frame.set_index("timestamp")
+    candles_frame = candles.copy().reset_index(drop=True)
+    candles_frame["timestamp"] = pd.to_datetime(candles_frame["timestamp"], utc=True)
+    signal_frame = candles_frame[["timestamp"]].merge(signal_frame, on="timestamp", how="left")
+    if "signal" not in signal_frame.columns:
+        signal_frame["signal"] = 0
+    signal_frame["signal"] = signal_frame["signal"].fillna(0).astype(int)
+
+    if config.ma_stop:
+        ma_column = _ma_stop_column(config)
+        if ma_column not in signal_frame.columns:
+            raise ValueError(
+                f"ma_stop requires strategy signals to include '{ma_column}' for source '{config.ma_stop_source}'."
+            )
+    else:
+        ma_column = None
 
     realized_equity = float(config.initial_capital)
     equity_rows: list[dict[str, object]] = []
@@ -485,17 +578,14 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
     position: OpenPosition | None = None
     trade_counter = 0
 
-    for index in range(1, len(candles)):
-        previous_bar = candles.iloc[index - 1]
-        current_bar = candles.iloc[index]
+    for index in range(1, len(candles_frame)):
+        previous_bar = candles_frame.iloc[index - 1]
+        current_bar = candles_frame.iloc[index]
         current_time = pd.Timestamp(current_bar["timestamp"])
 
-        signal_value = 0
-        if previous_bar["timestamp"] in signal_map.index:
-            row = signal_map.loc[previous_bar["timestamp"]]
-            if isinstance(row, pd.DataFrame):
-                row = row.iloc[-1]
-            signal_value = int(row.get("signal", 0))
+        previous_signal_row = signal_frame.iloc[index - 1]
+        current_signal_row = signal_frame.iloc[index]
+        signal_value = int(previous_signal_row.get("signal", 0))
 
         if position is not None:
             wants_opposite = (position.side == "long" and signal_value < 0) or (position.side == "short" and signal_value > 0)
@@ -512,7 +602,11 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             atr_at_signal = None
             if atr_series is not None:
                 atr_at_signal = float(atr_series.iloc[index - 1]) if pd.notna(atr_series.iloc[index - 1]) else None
-            if not requires_atr_at_entry or atr_at_signal is not None:
+            ma_at_signal = None
+            if ma_column is not None:
+                ma_raw = previous_signal_row.get(ma_column)
+                ma_at_signal = float(ma_raw) if pd.notna(ma_raw) else None
+            if (not requires_atr_at_entry or atr_at_signal is not None) and (ma_column is None or ma_at_signal is not None):
                 side = "long" if can_enter_long else "short"
                 trade_counter += 1
                 entry_price = _execution_price(side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=True)
@@ -531,6 +625,8 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                     trailing_stop_reason=_trailing_reason(config),
                     break_even_active=False,
                     break_even_stop_price=None,
+                    ma_stop_price=None,
+                    ma_stop_initial=None,
                     high_since_entry=float(current_bar["high"]),
                     low_since_entry=float(current_bar["low"]),
                     size=config.fixed_position_size,
@@ -551,6 +647,11 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 _update_extrema(position, current_bar)
                 _update_break_even_stop(position, current_bar, config)
                 current_atr = float(atr_series.iloc[index]) if atr_series is not None and pd.notna(atr_series.iloc[index]) else None
+                current_ma = None
+                if ma_column is not None:
+                    ma_raw = current_signal_row.get(ma_column)
+                    current_ma = float(ma_raw) if pd.notna(ma_raw) else None
+                _update_ma_stop(position, current_ma, config, current_atr=current_atr)
                 chandelier_atr = (
                     float(chandelier_atr_series.iloc[index])
                     if chandelier_atr_series is not None and pd.notna(chandelier_atr_series.iloc[index])
@@ -573,10 +674,10 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
         )
 
     if position is not None:
-        last_bar = candles.iloc[-1]
+        last_bar = candles_frame.iloc[-1]
         exit_price = _execution_price(position.side, float(last_bar["close"]), spread=config.spread, slippage=config.slippage, is_entry=False)
         final_timestamp = pd.Timestamp(last_bar["timestamp"])
-        trade = _finalize_trade(position, final_timestamp, exit_price, "forced_end", config, len(candles) - 1)
+        trade = _finalize_trade(position, final_timestamp, exit_price, "forced_end", config, len(candles_frame) - 1)
         trades.append(trade)
         realized_equity += float(trade.net_pnl or 0.0)
         if equity_rows:
@@ -612,6 +713,9 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 "trailing_stop_exit_hit",
                 "break_even_stop_price",
                 "break_even_exit_hit",
+                "ma_stop_initial",
+                "ma_stop_final",
+                "ma_stop_exit_hit",
                 "exit_reason",
                 "duration_bars",
                 "gross_pnl",
@@ -626,5 +730,5 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
         metrics=metrics,
         equity_curve=equity_curve,
         signals=signal_frame.reset_index(drop=True),
-        candles=candles,
+        candles=candles_frame,
     )

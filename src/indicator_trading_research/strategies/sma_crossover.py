@@ -51,5 +51,4 @@ class SMACrossoverStrategy(BaseStrategy):
         frame.loc[frame["signal"] > 0, "tag"] = f"sma_cross_up_{self.short_window}_{self.long_window}"
         frame.loc[frame["signal"] < 0, "tag"] = f"sma_cross_down_{self.short_window}_{self.long_window}"
         frame["strategy_name"] = self.strategy_name
-        return frame[["timestamp", "signal", "side", "tag", "strategy_name"]].copy()
-
+        return frame[["timestamp", "signal", "side", "tag", "strategy_name", "short_sma", "long_sma"]].copy()
