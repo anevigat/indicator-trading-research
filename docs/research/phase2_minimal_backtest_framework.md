@@ -10,7 +10,7 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - next-bar execution only
 - one open position at a time
 - long and short support
-- fixed-size position sizing
+- fixed-size and risk-percent position sizing
 - optional spread, slippage, and flat fee assumptions
 - optional stop-loss / take-profit hooks in the config contract
 - deterministic outputs saved to a standardized run folder
@@ -67,6 +67,17 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - short MA stop candidate: `MA + buffer`
 - MA stop ratchets only in the favorable direction and never loosens once established
 - `ma_stop_buffer_mode=atr` uses live ATR on each update bar when ATR is available
+- the engine supports two sizing modes:
+  `fixed`
+  `risk_percent`
+- `fixed` uses `fixed_position_size` directly and preserves the earlier normalized behavior
+- `risk_percent` uses current realized capital and an entry-time stop distance to size the trade
+- v1 risk sizing uses the explicit simplified formula:
+  `position_size = (current_capital * risk_percent) / stop_distance_price`
+- this is intentionally not full broker-accurate FX pip-value conversion yet; it is price-unit sizing for research compounding
+- `risk_percent` requires a valid entry-time stop distance from either `stop_loss` or an MA stop that can be computed at entry
+- trailing activation, chandelier trailing, and later stop tightening are not valid standalone entry-time stop providers
+- if `risk_percent` mode cannot derive a valid positive stop distance for a given entry, that trade is skipped rather than opened with undefined risk
 - intrabar stop-loss and take-profit checks are evaluated on the bar after entry has been established, including the entry bar itself
 - if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped only when an entry-time ATR-dependent protection requires `atr_at_entry`
 - the effective stop is the tightest active stop among static stop-loss, break-even, MA stop, and trailing stop
@@ -88,6 +99,15 @@ Each run folder contains:
 - `equity_curve.parquet`
 
 The `run_id` is deterministic from the serialized config payload so repeated identical runs land in the same path.
+
+`metrics.json` now includes:
+
+- `initial_capital`
+- `final_capital`
+- `total_return_pct`
+- `max_drawdown_pct`
+- `average_risk_amount`
+- `average_position_size_used`
 
 `trades.parquet` includes an `exit_reason` field. Current values are:
 
@@ -113,6 +133,16 @@ Current exit layers add these optional output fields:
 - `ma_stop_final`
 - `ma_stop_exit_hit`
 
+Capital-aware runs also include:
+
+- `position_size_used`
+- `capital_before`
+- `capital_after`
+- `risk_amount`
+- `stop_distance_at_entry`
+
+`equity_curve.parquet` includes both mark-to-market `equity` and realized `capital`.
+
 ## Connection To The Visualization Framework
 
 `trades.parquet` is saved in the same normalized schema used by the chart overlay tools, so a completed backtest run can be visualized directly with `scripts/plot_candles.py`.
@@ -123,6 +153,8 @@ Current exit layers add these optional output fields:
 - there is no optimization, walk-forward, or sweep framework yet
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
+- there is no broker-accurate FX pip-value conversion by pair yet
+- there is no leverage or lot-rounding model yet
 - trailing stop and chandelier updates are close-only in Phase T2
 - MA stop updates are also close-only in Phase M1
 - there is no stepped trailing, break-even-to-trail handoff customization, or trailing-take-profit logic

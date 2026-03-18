@@ -14,7 +14,7 @@ DEFAULT_MIN_PROFIT_FACTOR = 1.03
 DEFAULT_MAX_DRAWDOWN = 0.35
 DEFAULT_MIN_WIN_RATE = 0.30
 DEFAULT_SORT_BY = "profit_factor"
-DISPLAY_COLUMNS = ["summary", "trades", "net_pnl", "win_rate", "profit_factor", "rd_ratio"]
+DISPLAY_COLUMNS = ["summary", "trades", "net_pnl", "win_rate", "profit_factor", "rd_ratio", "final_capital"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,6 +132,8 @@ def build_summary(row: pd.Series) -> str:
 def build_display_frame(df: pd.DataFrame) -> pd.DataFrame:
     win_col, trades_col = resolve_metric_columns(df)
     display = df.copy()
+    if "final_capital" not in display.columns:
+        display["final_capital"] = pd.NA
     display["summary"] = display.apply(build_summary, axis=1)
     display = display[
         [
@@ -141,13 +143,15 @@ def build_display_frame(df: pd.DataFrame) -> pd.DataFrame:
             win_col,
             "profit_factor",
             "rd_ratio",
+            "final_capital",
         ]
     ].copy()
     display = display.rename(columns={trades_col: "trades", win_col: "win_rate"})
-    display["net_pnl"] = display["net_pnl"].round(6)
-    display["win_rate"] = (display["win_rate"] * 100).round(2)
-    display["profit_factor"] = display["profit_factor"].round(3)
-    display["rd_ratio"] = display["rd_ratio"].round(3)
+    display["net_pnl"] = pd.to_numeric(display["net_pnl"], errors="coerce").round(6)
+    display["win_rate"] = (pd.to_numeric(display["win_rate"], errors="coerce") * 100).round(2)
+    display["profit_factor"] = pd.to_numeric(display["profit_factor"], errors="coerce").round(3)
+    display["rd_ratio"] = pd.to_numeric(display["rd_ratio"], errors="coerce").round(3)
+    display["final_capital"] = pd.to_numeric(display["final_capital"], errors="coerce").round(2)
     return display[DISPLAY_COLUMNS]
 
 
