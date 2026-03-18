@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "run_experiments.py"
@@ -21,6 +24,7 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
             exit_profiles=["none", "atr_trailing"],
             start_date="2025-01-01",
             end_date="2025-02-15",
+            experiment_version="v1",
         )
     )
 
@@ -29,36 +33,115 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
         not (len(config["ma_periods"]) == 3 and config["entry_type"] == "crossover")
         for config in configs
     )
+    assert all(config["version"] == "v1" for config in configs)
     assert all(
         config["trailing_type_variant"] in {None, "standard", "chandelier"}
         for config in configs
     )
-    assert all(
-        config["trailing_type_variant"] is None
-        if config["exit_profile"] == "none"
-        else True
-        for config in configs
+
+
+def test_experiment_hash_changes_when_version_changes() -> None:
+    config = {"pair": "EURUSD", "timeframe": "1h", "ma_types": ["ema", "sma"], "ma_periods": [20, 50]}
+
+    assert MODULE.experiment_hash(config, "v1") != MODULE.experiment_hash(config, "v2")
+
+
+def test_flush_result_buffer_writes_rows_to_dataset_directory(tmp_path: Path) -> None:
+    output_path = tmp_path / "ma_matrix.parquet"
+    rows = [
+        {column: None for column in MODULE.RESULT_COLUMNS},
+        {column: None for column in MODULE.RESULT_COLUMNS},
+    ]
+    rows[0]["config_hash"] = "a"
+    rows[1]["config_hash"] = "b"
+
+    next_index = MODULE.flush_result_buffer(output_path, rows, part_index=0)
+
+    assert next_index == 1
+    assert rows == []
+    frame = pd.read_parquet(output_path)
+    assert sorted(frame["config_hash"].tolist()) == ["a", "b"]
+
+
+def test_load_completed_hashes_reads_only_written_hashes(tmp_path: Path) -> None:
+    output_path = tmp_path / "ma_matrix.parquet"
+    rows = [{column: None for column in MODULE.RESULT_COLUMNS}]
+    rows[0]["config_hash"] = "hash-1"
+    MODULE.flush_result_buffer(output_path, rows, part_index=0)
+
+    assert MODULE.load_completed_hashes(output_path) == {"hash-1"}
+
+
+def test_resume_skips_preexisting_config_hashes(tmp_path: Path) -> None:
+    output_path = tmp_path / "ma_matrix.parquet"
+    configs = list(
+        MODULE.iter_experiment_configs(
+            pairs=["EURUSD"],
+            timeframes=["1h"],
+            exit_profiles=["none"],
+            start_date="2025-01-01",
+            end_date="2025-01-15",
+            experiment_version="v1",
+        )
     )
+    existing_hash = configs[0]["config_hash"]
+    rows = [{column: None for column in MODULE.RESULT_COLUMNS}]
+    rows[0]["config_hash"] = existing_hash
+    MODULE.flush_result_buffer(output_path, rows, part_index=0)
+
+    completed_hashes = MODULE.load_completed_hashes(output_path)
+    pending = [config for config in configs if config["config_hash"] not in completed_hashes]
+
+    assert len(pending) == len(configs) - 1
+    assert all(config["config_hash"] != existing_hash for config in pending)
 
 
-def test_experiment_hash_is_stable_for_equivalent_payloads() -> None:
-    config_a = {"pair": "EURUSD", "timeframe": "1h", "ma_types": ["ema", "sma"], "ma_periods": [20, 50]}
-    config_b = {"ma_periods": [20, 50], "ma_types": ["ema", "sma"], "timeframe": "1h", "pair": "EURUSD"}
+def test_validate_metrics_file_rejects_missing_required_keys(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "metrics.json").write_text(json.dumps({"total_trades": 1, "net_pnl": 1.0}), encoding="utf-8")
 
-    assert MODULE.experiment_hash(config_a) == MODULE.experiment_hash(config_b)
+    with pytest.raises(ValueError, match="metrics.json is missing required keys"):
+        MODULE.validate_metrics_file(run_dir)
 
 
-def test_append_result_row_round_trips_parquet(tmp_path: Path) -> None:
-    results_path = tmp_path / "ma_matrix.parquet"
+def test_append_failed_run_writes_timestamp_and_config(tmp_path: Path) -> None:
+    failed_log_path = tmp_path / "failed_runs.jsonl"
+    payload = {
+        "config_hash": "abc",
+        "config": {"pair": "EURUSD"},
+        "error": "boom",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }
 
-    MODULE.append_result_row(results_path, {"config_hash": "a", "net_pnl": 1.23})
-    MODULE.append_result_row(results_path, {"config_hash": "b", "net_pnl": 4.56})
+    MODULE.append_failed_run(failed_log_path, payload)
 
-    frame = pd.read_parquet(results_path)
-    assert list(frame["config_hash"]) == ["a", "b"]
-    assert list(frame["net_pnl"]) == [1.23, 4.56]
+    entries = failed_log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(entries) == 1
+    parsed = json.loads(entries[0])
+    assert parsed["config_hash"] == "abc"
+    assert parsed["config"]["pair"] == "EURUSD"
+    assert parsed["timestamp"] == "2026-01-01T00:00:00+00:00"
 
 
 def test_normalize_selection_supports_case_insensitive_pairs_and_exact_timeframes() -> None:
     assert MODULE.normalize_selection(["eurusd", "USDJPY"], MODULE.PAIRS) == ["EURUSD", "USDJPY"]
     assert MODULE.normalize_selection(["1h", "4h"], MODULE.TIMEFRAMES) == ["1h", "4h"]
+
+
+def test_parse_args_defaults_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiments.py",
+            "--pairs",
+            "EURUSD",
+            "--timeframes",
+            "1h",
+        ],
+    )
+
+    args = MODULE.parse_args()
+
+    assert args.data_root == "data/processed"

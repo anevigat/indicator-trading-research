@@ -662,7 +662,7 @@ python scripts/plot_candles.py \
   --output outputs/charts/eurusd_15m_sma_backtest.html
 ```
 
-## Batch MA Experiments
+## Experiment Runner (Production Mode)
 
 The experiment runner executes a hardcoded MA-strategy research matrix across:
 
@@ -673,7 +673,7 @@ The experiment runner executes a hardcoded MA-strategy research matrix across:
 - entry types
 - exit profiles
 
-Results are flattened into a single parquet dataset at:
+Results are flattened into a parquet dataset at:
 
 `outputs/experiments/ma_matrix.parquet`
 
@@ -681,13 +681,35 @@ Failed configs are appended to:
 
 `outputs/experiments/failed_runs.jsonl`
 
-Resume is hash-based. Each config is serialized and hashed with SHA-1, then skipped automatically if its hash is already present in the results parquet.
+Production-mode behavior:
+
+- every config hash includes an experiment version, so logic changes can invalidate prior cache entries safely
+- each result row includes the full flattened config snapshot, not just the hash
+- each accepted row includes runtime metadata such as `run_started_at` and `run_duration_sec`
+- failures are appended to `failed_runs.jsonl` with config, error, and timestamp
+- successful rows are buffered and flushed in chunks instead of rewriting the full parquet dataset on every run
+- resume loads only `config_hash` values from the existing dataset and skips completed configs automatically
+
+Output schema includes:
+
+- `config_hash`
+- `version`
+- `pair`, `timeframe`
+- `ma_types`, `ma_periods`, `entry_type`
+- `exit_profile`, `trailing_type`
+- all exit parameters such as stop-loss, take-profit, ATR, trailing, break-even, and MA-stop settings
+- core metrics such as `total_trades`, `net_pnl`, `profit_factor`, and `max_drawdown`
+- `output_path`
+- `config_json`
+- `run_started_at`
+- `run_duration_sec`
 
 Run the full matrix:
 
 ```bash
 python scripts/run_experiments.py \
-  --data-root data/processed
+  --data-root data/processed \
+  --output-path outputs/experiments/ma_matrix.parquet
 ```
 
 Run a bounded subset for one pair and timeframe:
@@ -695,10 +717,12 @@ Run a bounded subset for one pair and timeframe:
 ```bash
 python scripts/run_experiments.py \
   --data-root data/processed \
+  --output-path outputs/experiments/ma_matrix.parquet \
   --pairs EURUSD \
   --timeframes 1h \
   --start-date 2025-01-01 \
   --end-date 2025-01-15 \
+  --flush-every 5 \
   --max-runs 5
 ```
 
@@ -707,14 +731,24 @@ Resume the same subset later:
 ```bash
 python scripts/run_experiments.py \
   --data-root data/processed \
+  --output-path outputs/experiments/ma_matrix.parquet \
   --pairs EURUSD \
   --timeframes 1h \
   --start-date 2025-01-01 \
   --end-date 2025-01-15 \
+  --flush-every 5 \
   --max-runs 5
 ```
 
-The second run will skip hashes already saved in `ma_matrix.parquet` and continue with the next pending configs rather than rerunning completed ones.
+The second run will skip hashes already saved in the parquet dataset and continue with the next pending configs rather than rerunning completed ones.
+
+If you intentionally change runner logic and want fresh hashes without deleting old results, override the experiment version:
+
+```bash
+python scripts/run_experiments.py \
+  --data-root data/processed \
+  --experiment-version v2
+```
 
 ## Notes
 
