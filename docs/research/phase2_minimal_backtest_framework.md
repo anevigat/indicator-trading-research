@@ -27,9 +27,11 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - long exits sell at `exit_price - spread/2 - slippage`
 - short entries sell at `next_open - spread/2 - slippage`
 - short exits buy at `exit_price + spread/2 + slippage`
-- `ma_strategy` supports `sma` and `ema`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
+- `ma_strategy` supports `sma`, `ema`, `wma`, and `hma`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
 - `entry_type='crossover'` currently supports exactly 2 moving averages
 - MA definitions are sorted by period internally; the strategy output includes `ma_1..ma_3` plus `ma_fast` and `ma_slow`
+- WMA uses linearly increasing weights over the rolling window
+- HMA uses `WMA(2 * WMA(price, n/2) - WMA(price, n), sqrt(n))` with integer division for `n/2` and `int(sqrt(n))` for the final smoothing period
 - stop-loss and take-profit support two modes: `absolute` and `atr`
 - `absolute` means a fixed price distance from the adjusted entry price
 - `atr` means a multiple of ATR from the signal bar close, then frozen at entry for the life of the trade

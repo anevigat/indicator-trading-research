@@ -40,6 +40,31 @@ def test_compute_ma_supports_sma_and_ema() -> None:
     assert ema.iloc[3] == pytest.approx(3.5185185185)
 
 
+def test_compute_ma_supports_wma() -> None:
+    series = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+
+    wma = compute_ma(series, period=3, ma_type="wma")
+
+    assert pd.isna(wma.iloc[0])
+    assert pd.isna(wma.iloc[1])
+    assert wma.iloc[2] == pytest.approx((1.0 * 1 + 2.0 * 2 + 3.0 * 3) / 6.0)
+    assert wma.iloc[3] == pytest.approx((2.0 * 1 + 3.0 * 2 + 4.0 * 3) / 6.0)
+    assert wma.iloc[4] == pytest.approx((3.0 * 1 + 4.0 * 2 + 5.0 * 3) / 6.0)
+
+
+def test_compute_ma_supports_hma() -> None:
+    series = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    hma = compute_ma(series, period=4, ma_type="hma")
+
+    assert pd.isna(hma.iloc[0])
+    assert pd.isna(hma.iloc[1])
+    assert pd.isna(hma.iloc[2])
+    assert pd.isna(hma.iloc[3])
+    assert hma.iloc[4] == pytest.approx(5.0)
+    assert hma.iloc[5] == pytest.approx(6.0)
+
+
 def test_crossover_signals_with_two_mas() -> None:
     candles = build_candles([5.0, 4.0, 3.0, 4.0, 5.0, 4.0, 3.0])
     strategy = MAStrategy(
@@ -57,6 +82,39 @@ def test_crossover_signals_with_two_mas() -> None:
         pd.Timestamp("2025-01-01T06:00:00Z"),
     ]
     assert {"ma_1", "ma_2", "ma_fast", "ma_slow"}.issubset(signals.columns)
+
+
+def test_wma_crossover_signals_with_two_mas() -> None:
+    candles = build_candles([5.0, 4.0, 3.0, 4.0, 5.0, 4.0, 3.0])
+    strategy = MAStrategy(
+        ma_types=["wma", "wma"],
+        ma_periods=[2, 3],
+        entry_type="crossover",
+    )
+
+    signals = strategy.generate_signals(candles)
+    non_zero = signals.loc[signals["signal"] != 0, ["timestamp", "signal"]]
+
+    assert list(non_zero["signal"]) == [1, -1]
+    assert list(non_zero["timestamp"]) == [
+        pd.Timestamp("2025-01-01T04:00:00Z"),
+        pd.Timestamp("2025-01-01T06:00:00Z"),
+    ]
+
+
+def test_hma_crossover_signals_with_two_mas() -> None:
+    candles = build_candles([8.0, 7.0, 6.0, 5.0, 6.0, 7.0, 8.0, 7.0, 6.0, 5.0])
+    strategy = MAStrategy(
+        ma_types=["hma", "hma"],
+        ma_periods=[3, 5],
+        entry_type="crossover",
+    )
+
+    signals = strategy.generate_signals(candles)
+    non_zero = signals.loc[signals["signal"] != 0, ["timestamp", "signal"]]
+
+    assert list(non_zero["signal"]) == [-1]
+    assert list(non_zero["timestamp"]) == [pd.Timestamp("2025-01-01T07:00:00Z")]
 
 
 def test_price_above_all_uses_sorted_periods_not_input_order() -> None:
@@ -93,6 +151,19 @@ def test_crossover_breakout_requires_crossover_and_price_position() -> None:
     ]
 
 
+def test_hma_sma_crossover_breakout_is_supported() -> None:
+    candles = build_candles([7.0, 6.0, 5.0, 4.0, 5.0, 7.0, 9.0, 8.0, 7.0, 6.0])
+    strategy = MAStrategy(
+        ma_types=["hma", "sma"],
+        ma_periods=[3, 5],
+        entry_type="crossover_breakout",
+    )
+
+    signals = strategy.generate_signals(candles)
+    assert {"ma_1", "ma_2", "ma_fast", "ma_slow", "signal"}.issubset(signals.columns)
+    assert len(signals) == len(candles)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -101,7 +172,7 @@ def test_crossover_breakout_requires_crossover_and_price_position() -> None:
             "ma_types and ma_periods must have the same length",
         ),
         (
-            {"ma_types": ["sma", "wma"], "ma_periods": [10, 20], "entry_type": "price_above_all"},
+            {"ma_types": ["sma", "bad_ma"], "ma_periods": [10, 20], "entry_type": "price_above_all"},
             "Unsupported ma_type",
         ),
         (
