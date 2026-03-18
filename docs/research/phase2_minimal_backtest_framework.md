@@ -53,9 +53,16 @@ Establish a small reusable backtesting layer on top of processed parquet candles
 - `break_even_mode=atr` uses `atr_at_entry` as the activation reference
 - `break_even_buffer_mode=atr` also uses `atr_at_entry`
 - when break-even activates, the stop moves to entry plus or minus the configured buffer and never loosens after activation
+- Phase M1 adds optional MA stop support using the strategy-provided `short_sma` or `long_sma`
+- the selected MA source must be available on the signal bar close; otherwise that signal is skipped
+- MA stop updates use the current bar MA after hit checks, so any tightened MA stop applies from the next bar onward
+- long MA stop candidate: `MA - buffer`
+- short MA stop candidate: `MA + buffer`
+- MA stop ratchets only in the favorable direction and never loosens once established
+- `ma_stop_buffer_mode=atr` uses live ATR on each update bar when ATR is available
 - intrabar stop-loss and take-profit checks are evaluated on the bar after entry has been established, including the entry bar itself
 - if ATR is `NaN` on the signal bar because warmup is incomplete, that signal is skipped only when an entry-time ATR-dependent protection requires `atr_at_entry`
-- the effective stop is the tightest active stop among static stop-loss, break-even, and trailing stop
+- the effective stop is the tightest active stop among static stop-loss, break-even, MA stop, and trailing stop
 - if both stop-side and take-profit are touched in the same bar, the engine uses the conservative deterministic rule: the active stop side is assumed to trigger first
 - if a position is still open at the end of the data window, it is closed on the final bar close using the configured execution adjustments
 
@@ -80,6 +87,7 @@ The `run_id` is deterministic from the serialized config payload so repeated ide
 - `signal_exit`
 - `stop_loss`
 - `break_even`
+- `ma_stop`
 - `trailing_stop`
 - `chandelier_trailing_stop`
 - `take_profit`
@@ -94,6 +102,9 @@ Phase T1 trailing adds these optional output fields:
 - `trailing_stop_exit_hit`
 - `break_even_stop_price`
 - `break_even_exit_hit`
+- `ma_stop_initial`
+- `ma_stop_final`
+- `ma_stop_exit_hit`
 
 ## Connection To The Visualization Framework
 
@@ -106,6 +117,7 @@ Phase T1 trailing adds these optional output fields:
 - there is no portfolio layer
 - there is no partial-fill or order-book modeling
 - trailing stop and chandelier updates are close-only in Phase T2
+- MA stop updates are also close-only in Phase M1
 - there is no stepped trailing, break-even-to-trail handoff customization, or trailing-take-profit logic
 - there is no higher-timeframe ATR support
 - equity is tracked with realized equity plus close-based mark-to-market for an open position

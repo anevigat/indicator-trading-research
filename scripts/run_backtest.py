@@ -51,6 +51,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--break-even-mode", choices=["absolute", "atr"], default=None, help="Break-even activation mode.")
     parser.add_argument("--break-even-buffer", type=float, default=None, help="Optional buffer added beyond entry when break-even activates.")
     parser.add_argument("--break-even-buffer-mode", choices=["absolute", "atr"], default=None, help="Break-even buffer mode.")
+    parser.add_argument("--ma-stop", action="store_true", help="Enable a moving-average-based dynamic stop.")
+    parser.add_argument("--ma-stop-source", choices=["short", "long"], default="short", help="Which SMA series the MA stop should use.")
+    parser.add_argument("--ma-stop-buffer", type=float, default=None, help="Optional MA-stop buffer in absolute units or ATR multiples.")
+    parser.add_argument("--ma-stop-buffer-mode", choices=["absolute", "atr"], default=None, help="MA-stop buffer mode.")
     parser.add_argument("--atr-period", type=int, default=14, help="ATR period used when any protection mode is 'atr'.")
     parser.add_argument("--atr-method", choices=["wilder", "sma", "ema"], default="wilder", help="ATR smoothing method.")
     parser.add_argument("--output-root", required=True, help="Root directory for saved backtest outputs.")
@@ -118,6 +122,10 @@ def main() -> None:
             break_even=args.break_even,
             break_even_buffer_mode=args.break_even_buffer_mode if args.break_even is not None or args.break_even_buffer is not None else None,
             break_even_buffer=args.break_even_buffer,
+            ma_stop=args.ma_stop,
+            ma_stop_source=args.ma_stop_source,
+            ma_stop_buffer_mode=args.ma_stop_buffer_mode if args.ma_stop_buffer is not None else None,
+            ma_stop_buffer=args.ma_stop_buffer,
             atr_period=args.atr_period,
             atr_method=args.atr_method,
         )
@@ -151,8 +159,12 @@ def main() -> None:
         f"break_even_mode={config.break_even_mode} "
         f"break_even_buffer={config.break_even_buffer} "
         f"break_even_buffer_mode={config.break_even_buffer_mode} "
-        f"atr_period={config.atr_period if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode)) else 'n/a'} "
-        f"atr_method={config.atr_method if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode)) else 'n/a'} "
+        f"ma_stop={config.ma_stop} "
+        f"ma_stop_source={config.ma_stop_source} "
+        f"ma_stop_buffer={config.ma_stop_buffer} "
+        f"ma_stop_buffer_mode={config.ma_stop_buffer_mode} "
+        f"atr_period={config.atr_period if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode, config.ma_stop_buffer_mode)) else 'n/a'} "
+        f"atr_method={config.atr_method if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode, config.ma_stop_buffer_mode)) else 'n/a'} "
         f"output={output_path}"
     )
 

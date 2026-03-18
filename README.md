@@ -311,7 +311,14 @@ Execution assumptions:
 - break-even stop is optional and activates only after price has moved far enough in favor
 - when break-even activates, the engine moves the stop to entry plus or minus the configured buffer and never loosens it afterward
 - break-even activation in `atr` mode uses `atr_at_entry`, and the optional break-even buffer in `atr` mode also uses `atr_at_entry`
+- Phase M1 adds optional MA-based stop loss support using the strategy-provided `short_sma` or `long_sma`
+- the chosen MA source must already be available on the signal bar or the trade is skipped
+- MA stop updates use the current bar's MA after hit checks, so a newly tightened MA stop applies from the next bar onward
+- for long trades the MA stop candidate is `MA - buffer`; for short trades it is `MA + buffer`
+- MA stop never loosens: it ratchets only in the favorable direction
+- MA-stop ATR buffer mode uses live ATR on each update bar when ATR is available
 - when stop-loss, break-even, and trailing are all present, the effective stop for the bar is the tightest active stop
+- when MA stop is enabled, the effective stop is the tightest active stop among static stop-loss, break-even, trailing, chandelier trailing, and MA stop
 - if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
 
 Outputs are saved to:
@@ -536,7 +543,42 @@ python scripts/run_backtest.py \
   --output-root outputs/backtests
 ```
 
-The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `break_even`, `trailing_stop`, `chandelier_trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, `trailing_stop_final`, and `break_even_stop_price`. It stays compatible with the existing candle overlay CLI.
+MA stop can run alongside the existing protections too:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy sma_crossover \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --short-window 20 \
+  --long-window 50 \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --stop-loss 1.0 \
+  --take-profit 2.0 \
+  --stop-loss-mode atr \
+  --take-profit-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --trailing-type chandelier \
+  --chandelier-multiplier 1.5 \
+  --break-even 1.0 \
+  --break-even-mode atr \
+  --break-even-buffer 0.25 \
+  --break-even-buffer-mode atr \
+  --ma-stop \
+  --ma-stop-source short \
+  --ma-stop-buffer 0.25 \
+  --ma-stop-buffer-mode atr \
+  --output-root outputs/backtests
+```
+
+The saved `trades.parquet` file includes `exit_reason` values such as `signal_exit`, `stop_loss`, `break_even`, `ma_stop`, `trailing_stop`, `chandelier_trailing_stop`, `take_profit`, and `forced_end`, plus additive fields like `atr_at_entry`, `trailing_stop_initial`, `trailing_stop_final`, `break_even_stop_price`, and `ma_stop_final`. It stays compatible with the existing candle overlay CLI.
 
 Visualize the resulting trades on candles:
 
