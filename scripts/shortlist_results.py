@@ -14,6 +14,7 @@ DEFAULT_MIN_PROFIT_FACTOR = 1.03
 DEFAULT_MAX_DRAWDOWN = 0.35
 DEFAULT_MIN_WIN_RATE = 0.30
 DEFAULT_SORT_BY = "profit_factor"
+DISPLAY_COLUMNS = ["summary", "trades", "net_pnl", "win_rate", "profit_factor", "rd_ratio"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,7 +75,19 @@ def resolve_metric_columns(df: pd.DataFrame) -> tuple[str, str]:
 
 def validate_columns(df: pd.DataFrame, sort_by: str) -> tuple[str, str]:
     win_col, trades_col = resolve_metric_columns(df)
-    required_columns = {win_col, trades_col, "profit_factor", "max_drawdown", "net_pnl"}
+    required_columns = {
+        win_col,
+        trades_col,
+        "pair",
+        "timeframe",
+        "entry_type",
+        "ma_types",
+        "ma_periods",
+        "exit_profile",
+        "profit_factor",
+        "max_drawdown",
+        "net_pnl",
+    }
     missing = sorted(column for column in required_columns if column not in df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -108,6 +121,34 @@ def add_derived_metrics(df: pd.DataFrame, trades_col: str) -> pd.DataFrame:
     df["rd_ratio"] = df["net_pnl"] / df["max_drawdown"].abs().replace(0, pd.NA)
     df["avg_trade"] = df["net_pnl"] / df[trades_col].replace(0, pd.NA)
     return df
+
+
+def build_summary(row: pd.Series) -> str:
+    ma_types = "/".join(str(row["ma_types"]).split(","))
+    ma_periods = "/".join(str(row["ma_periods"]).split(","))
+    return f"{row['pair']} {row['timeframe']} {row['entry_type']} {ma_types} {ma_periods} exit={row['exit_profile']}"
+
+
+def build_display_frame(df: pd.DataFrame) -> pd.DataFrame:
+    win_col, trades_col = resolve_metric_columns(df)
+    display = df.copy()
+    display["summary"] = display.apply(build_summary, axis=1)
+    display = display[
+        [
+            "summary",
+            trades_col,
+            "net_pnl",
+            win_col,
+            "profit_factor",
+            "rd_ratio",
+        ]
+    ].copy()
+    display = display.rename(columns={trades_col: "trades", win_col: "win_rate"})
+    display["net_pnl"] = display["net_pnl"].round(6)
+    display["win_rate"] = (display["win_rate"] * 100).round(2)
+    display["profit_factor"] = display["profit_factor"].round(3)
+    display["rd_ratio"] = display["rd_ratio"].round(3)
+    return display[DISPLAY_COLUMNS]
 
 
 def shortlist_dataframe(
@@ -175,7 +216,10 @@ def main() -> None:
         print("No strategies passed filters")
         return
 
-    print(shortlist.to_string(index=False))
+    display = build_display_frame(shortlist)
+    pd.set_option("display.max_rows", None)
+    pd.set_option("display.width", 140)
+    print(display.to_string(index=False, justify="left"))
 
     should_write = not args.print_only and args.output is not None
     if should_write:
