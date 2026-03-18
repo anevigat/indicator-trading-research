@@ -290,9 +290,10 @@ Execution assumptions:
 - only one open position is supported at a time in v1
 - long and short entries use the next bar open adjusted by configured spread and slippage
 - opposite signals exit on the next bar open and can flip into the new direction on that same open
-- `ma_strategy` supports `sma` and `ema`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
+- `ma_strategy` supports `sma`, `ema`, `wma`, and `hma`, 2 or 3 moving averages, and entry types `crossover`, `price_above_all`, and `crossover_breakout`
 - `crossover` currently supports exactly 2 moving averages
 - `ma_strategy` sorts MA definitions by period internally, then exposes `ma_1..ma_3` plus `ma_fast` and `ma_slow`
+- HMA uses the standard Hull formula `WMA(2 * WMA(price, n/2) - WMA(price, n), sqrt(n))` with integer division for `n/2` and `int(sqrt(n))` for the final smoothing period
 - stop-loss and take-profit support `absolute` and `atr` modes
 - optional trailing stop support exists in Phase T1 with `absolute` and `atr` modes
 - Phase T2 adds `chandelier` trailing and optional break-even stop support
@@ -369,6 +370,46 @@ python scripts/run_backtest.py \
   --end-date 2025-02-15 \
   --ma-types ema,sma,sma \
   --ma-periods 10,20,50 \
+  --entry-type crossover_breakout \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --output-root outputs/backtests
+```
+
+Run a WMA/WMA crossover:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy ma_strategy \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --ma-types wma,wma \
+  --ma-periods 20,50 \
+  --entry-type crossover \
+  --initial-capital 10000 \
+  --fixed-position-size 1 \
+  --spread 0.0001 \
+  --slippage 0.00002 \
+  --output-root outputs/backtests
+```
+
+Run an HMA/SMA hybrid with `crossover_breakout`:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy ma_strategy \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --ma-types hma,sma \
+  --ma-periods 20,50 \
   --entry-type crossover_breakout \
   --initial-capital 10000 \
   --fixed-position-size 1 \

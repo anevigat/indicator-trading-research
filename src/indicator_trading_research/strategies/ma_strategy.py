@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
+import numpy as np
 import pandas as pd
 
 from .base import BaseStrategy
 
-SUPPORTED_MA_TYPES = {"sma", "ema"}
+SUPPORTED_MA_TYPES = {"sma", "ema", "wma", "hma"}
 SUPPORTED_ENTRY_TYPES = {"crossover", "price_above_all", "crossover_breakout"}
+
+
+def _compute_wma(series: pd.Series, period: int) -> pd.Series:
+    weights = np.arange(1, period + 1, dtype=float)
+    denominator = float(weights.sum())
+    return series.rolling(window=period, min_periods=period).apply(
+        lambda values: float(np.dot(values, weights) / denominator),
+        raw=True,
+    )
 
 
 def compute_ma(series: pd.Series, period: int, ma_type: str) -> pd.Series:
@@ -20,6 +31,15 @@ def compute_ma(series: pd.Series, period: int, ma_type: str) -> pd.Series:
         return series.rolling(window=period, min_periods=period).mean()
     if normalized_type == "ema":
         return series.ewm(span=period, adjust=False, min_periods=period).mean()
+    if normalized_type == "wma":
+        return _compute_wma(series, period)
+    if normalized_type == "hma":
+        half_period = max(period // 2, 1)
+        sqrt_period = max(int(math.sqrt(period)), 1)
+        wma_half = _compute_wma(series, half_period)
+        wma_full = _compute_wma(series, period)
+        hull_input = 2.0 * wma_half - wma_full
+        return _compute_wma(hull_input, sqrt_period)
     supported = ", ".join(sorted(SUPPORTED_MA_TYPES))
     raise ValueError(f"Unsupported ma_type: {ma_type!r}. Supported types: {supported}.")
 
