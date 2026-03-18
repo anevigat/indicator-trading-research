@@ -30,8 +30,16 @@ class BacktestConfig:
     take_profit: float | None = None
     trailing_stop_mode: str | None = None
     trailing_stop: float | None = None
+    trailing_type: str = "standard"
     trailing_activation_mode: str | None = None
     trailing_activation: float | None = None
+    chandelier_multiplier: float | None = None
+    chandelier_atr_period: int = 14
+    chandelier_atr_method: str = "wilder"
+    break_even_mode: str | None = None
+    break_even: float | None = None
+    break_even_buffer_mode: str | None = None
+    break_even_buffer: float | None = None
     atr_period: int = 14
     atr_method: str = "wilder"
 
@@ -60,6 +68,8 @@ class TradeRecord:
     trailing_stop_initial: float | None = None
     trailing_stop_final: float | None = None
     trailing_stop_exit_hit: bool | None = None
+    break_even_stop_price: float | None = None
+    break_even_exit_hit: bool | None = None
     exit_reason: str | None = None
     duration_bars: int | None = None
     gross_pnl: float | None = None

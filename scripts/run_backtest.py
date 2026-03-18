@@ -41,8 +41,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--take-profit-mode", choices=["absolute", "atr"], default=None, help="Take-profit mode.")
     parser.add_argument("--trailing-stop", type=float, default=None, help="Trailing-stop distance or ATR multiple, depending on trailing-stop mode.")
     parser.add_argument("--trailing-stop-mode", choices=["absolute", "atr"], default=None, help="Trailing-stop mode.")
+    parser.add_argument("--trailing-type", choices=["standard", "chandelier"], default="standard", help="Trailing-stop implementation type.")
     parser.add_argument("--trailing-activation", type=float, default=None, help="Optional activation threshold for trailing stop.")
     parser.add_argument("--trailing-activation-mode", choices=["absolute", "atr"], default=None, help="Trailing-stop activation mode.")
+    parser.add_argument("--chandelier-multiplier", type=float, default=None, help="ATR multiplier used for chandelier trailing.")
+    parser.add_argument("--chandelier-atr-period", type=int, default=14, help="ATR period for chandelier trailing.")
+    parser.add_argument("--chandelier-atr-method", choices=["wilder", "sma", "ema"], default="wilder", help="ATR method for chandelier trailing.")
+    parser.add_argument("--break-even", type=float, default=None, help="Profit threshold for activating break-even stop.")
+    parser.add_argument("--break-even-mode", choices=["absolute", "atr"], default=None, help="Break-even activation mode.")
+    parser.add_argument("--break-even-buffer", type=float, default=None, help="Optional buffer added beyond entry when break-even activates.")
+    parser.add_argument("--break-even-buffer-mode", choices=["absolute", "atr"], default=None, help="Break-even buffer mode.")
     parser.add_argument("--atr-period", type=int, default=14, help="ATR period used when any protection mode is 'atr'.")
     parser.add_argument("--atr-method", choices=["wilder", "sma", "ema"], default="wilder", help="ATR smoothing method.")
     parser.add_argument("--output-root", required=True, help="Root directory for saved backtest outputs.")
@@ -100,8 +108,16 @@ def main() -> None:
             take_profit=args.take_profit,
             trailing_stop_mode=args.trailing_stop_mode if args.trailing_stop is not None else None,
             trailing_stop=args.trailing_stop,
+            trailing_type=args.trailing_type,
             trailing_activation_mode=args.trailing_activation_mode if args.trailing_activation is not None else None,
             trailing_activation=args.trailing_activation,
+            chandelier_multiplier=args.chandelier_multiplier,
+            chandelier_atr_period=args.chandelier_atr_period,
+            chandelier_atr_method=args.chandelier_atr_method,
+            break_even_mode=args.break_even_mode if args.break_even is not None else None,
+            break_even=args.break_even,
+            break_even_buffer_mode=args.break_even_buffer_mode if args.break_even is not None or args.break_even_buffer is not None else None,
+            break_even_buffer=args.break_even_buffer,
             atr_period=args.atr_period,
             atr_method=args.atr_method,
         )
@@ -123,12 +139,20 @@ def main() -> None:
         f"take_profit={config.take_profit} "
         f"stop_loss_mode={config.stop_loss_mode} "
         f"take_profit_mode={config.take_profit_mode} "
+        f"trailing_type={config.trailing_type} "
         f"trailing_stop={config.trailing_stop} "
         f"trailing_stop_mode={config.trailing_stop_mode} "
         f"trailing_activation={config.trailing_activation} "
         f"trailing_activation_mode={config.trailing_activation_mode} "
-        f"atr_period={config.atr_period if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode)) else 'n/a'} "
-        f"atr_method={config.atr_method if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode)) else 'n/a'} "
+        f"chandelier_multiplier={config.chandelier_multiplier} "
+        f"chandelier_atr_period={config.chandelier_atr_period if config.trailing_type == 'chandelier' else 'n/a'} "
+        f"chandelier_atr_method={config.chandelier_atr_method if config.trailing_type == 'chandelier' else 'n/a'} "
+        f"break_even={config.break_even} "
+        f"break_even_mode={config.break_even_mode} "
+        f"break_even_buffer={config.break_even_buffer} "
+        f"break_even_buffer_mode={config.break_even_buffer_mode} "
+        f"atr_period={config.atr_period if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode)) else 'n/a'} "
+        f"atr_method={config.atr_method if any(mode == 'atr' for mode in (config.stop_loss_mode, config.take_profit_mode, config.trailing_stop_mode, config.trailing_activation_mode, config.break_even_mode, config.break_even_buffer_mode)) else 'n/a'} "
         f"output={output_path}"
     )
 
