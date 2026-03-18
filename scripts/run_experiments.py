@@ -44,33 +44,45 @@ PAIRS = [
 
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-MA_PERIODS_2 = [(10, 50), (20, 50), (25, 50)]
-MA_PERIODS_3 = [(10, 20, 50), (20, 50, 100), (25, 50, 200)]
+MA_PERIODS_2 = [(25, 50), (50, 100), (100, 200)]
+MA_PERIODS_3 = [(25, 50, 100), (50, 100, 200)]
 
 MA_TYPES_2 = [
     ("sma", "sma"),
+    ("sma", "ema"),
+    ("sma", "wma"),
     ("ema", "ema"),
-    ("wma", "wma"),
     ("ema", "sma"),
+    ("ema", "wma"),
+    ("wma", "wma"),
+    ("wma", "ema"),
     ("wma", "sma"),
 ]
 
 MA_TYPES_3 = [
     ("sma", "sma", "sma"),
+    ("ema", "ema", "ema"),
     ("ema", "sma", "sma"),
     ("wma", "sma", "sma"),
 ]
 
-ENTRY_TYPES_2 = ["crossover", "crossover_breakout"]
+ENTRY_TYPES_2 = ["crossover", "crossover_breakout", "price_above_all"]
 ENTRY_TYPES_3 = ["crossover", "crossover_breakout", "price_above_all"]
 
 EXIT_PROFILES = [
     "none",
-    "fixed",
-    "atr",
-    "atr_trailing",
-    "atr_trailing_be",
-    "atr_ma_stop",
+    "fixed1010",
+    "fixed1020",
+    "fixed1030",
+    "fixed2020",
+    "fixed2040",
+    "fixed2060",
+    "atr051",
+    "atr12",
+    "atr13",
+    # "atr_trailing",
+    # "atr_trailing_be",
+    # "atr_ma_stop",
 ]
 
 TRAILING_TYPES = ["standard", "chandelier"]
@@ -92,16 +104,58 @@ DEFAULT_BACKTEST_SETTINGS: dict[str, Any] = {
 
 EXIT_PROFILE_SETTINGS: dict[str, dict[str, Any]] = {
     "none": {},
-    "fixed": {
+    "fixed1010": {
+        "stop_loss": 0.0010,
+        "stop_loss_mode": "absolute",
+        "take_profit": 0.0010,
+        "take_profit_mode": "absolute",
+    },
+    "fixed1020": {
+        "stop_loss": 0.0010,
+        "stop_loss_mode": "absolute",
+        "take_profit": 0.0020,
+        "take_profit_mode": "absolute",
+    },
+    "fixed1030": {
+        "stop_loss": 0.0010,
+        "stop_loss_mode": "absolute",
+        "take_profit": 0.0030,
+        "take_profit_mode": "absolute",
+    },
+    "fixed2020": {
+        "stop_loss": 0.0020,
+        "stop_loss_mode": "absolute",
+        "take_profit": 0.0020,
+        "take_profit_mode": "absolute",
+    },
+    "fixed2040": {
         "stop_loss": 0.0020,
         "stop_loss_mode": "absolute",
         "take_profit": 0.0040,
         "take_profit_mode": "absolute",
     },
-    "atr": {
+    "fixed2060": {
+        "stop_loss": 0.0020,
+        "stop_loss_mode": "absolute",
+        "take_profit": 0.0060,
+        "take_profit_mode": "absolute",
+    },
+    "atr051": {
+        "stop_loss": 0.5,
+        "stop_loss_mode": "atr",
+        "take_profit": 1.0,
+        "take_profit_mode": "atr",
+    },
+    "atr12": {
         "stop_loss": 1.0,
         "stop_loss_mode": "atr",
         "take_profit": 2.0,
+        "take_profit_mode": "atr",
+    },
+    "atr13": {
+        "stop_loss": 1.0,
+        "stop_loss_mode": "atr",
+        "take_profit": 3.0,
         "take_profit_mode": "atr",
     },
     "atr_trailing": {
