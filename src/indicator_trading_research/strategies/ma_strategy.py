@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,23 @@ class MASpec:
     period: int
     ma_type: str
     original_index: int
+
+
+MAKey = tuple[str, int]
+
+
+def build_ma_cache(candles: pd.DataFrame, required_keys: set[MAKey]) -> dict[MAKey, pd.Series]:
+    """Precompute MA series keyed by (ma_type, period) for a candle slice."""
+    if not required_keys:
+        return {}
+    if "close" not in candles.columns:
+        raise ValueError("Candles must include a close column to build an MA cache.")
+
+    close = candles["close"]
+    cache: dict[MAKey, pd.Series] = {}
+    for ma_type, period in sorted(required_keys, key=lambda item: (item[1], item[0])):
+        cache[(ma_type, period)] = compute_ma(close, period, ma_type)
+    return cache
 
 
 class MAStrategy(BaseStrategy):
@@ -97,7 +115,15 @@ class MAStrategy(BaseStrategy):
             allow_short=allow_short,
         )
 
-    def generate_signals(self, candles: pd.DataFrame) -> pd.DataFrame:
+    def required_ma_keys(self) -> set[MAKey]:
+        return {(spec.ma_type, spec.period) for spec in self.ma_specs}
+
+    def generate_signals(
+        self,
+        candles: pd.DataFrame,
+        *,
+        indicator_cache: Mapping[MAKey, pd.Series] | None = None,
+    ) -> pd.DataFrame:
         if candles.empty:
             raise ValueError("Cannot generate signals from an empty candle dataframe.")
 
@@ -105,7 +131,11 @@ class MAStrategy(BaseStrategy):
         ma_columns: list[str] = []
         for index, spec in enumerate(self.ma_specs, start=1):
             column = f"ma_{index}"
-            frame[column] = compute_ma(frame["close"], spec.period, spec.ma_type)
+            cache_key = (spec.ma_type, spec.period)
+            if indicator_cache is not None and cache_key in indicator_cache:
+                frame[column] = indicator_cache[cache_key]
+            else:
+                frame[column] = compute_ma(frame["close"], spec.period, spec.ma_type)
             ma_columns.append(column)
 
         frame["ma_fast"] = frame[ma_columns[0]]

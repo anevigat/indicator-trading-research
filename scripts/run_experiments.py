@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import hashlib
 import json
 import shutil
@@ -28,7 +29,7 @@ from indicator_trading_research.backtest import (  # noqa: E402
     run_backtest,
     save_backtest_result,
 )
-from indicator_trading_research.strategies import MAStrategy  # noqa: E402
+from indicator_trading_research.strategies import MAStrategy, build_ma_cache  # noqa: E402
 
 EXPERIMENT_VERSION = "v1"
 
@@ -516,6 +517,59 @@ def iter_experiment_configs(
                                 )
 
 
+def dataset_slice_key(experiment: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        experiment["pair"],
+        experiment["timeframe"],
+        experiment["start_date"],
+        experiment["end_date"],
+    )
+
+
+def group_experiments_by_slice(
+    experiments: list[dict[str, Any]],
+) -> list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]]:
+    grouped: OrderedDict[tuple[str, str, str, str], list[dict[str, Any]]] = OrderedDict()
+    for experiment in experiments:
+        grouped.setdefault(dataset_slice_key(experiment), []).append(experiment)
+    return list(grouped.items())
+
+
+def strategy_cache_key(experiment: dict[str, Any]) -> tuple[tuple[str, ...], tuple[int, ...], str, bool, bool]:
+    return (
+        tuple(experiment["ma_types"]),
+        tuple(int(period) for period in experiment["ma_periods"]),
+        experiment["entry_type"],
+        bool(experiment["allow_long"]),
+        bool(experiment["allow_short"]),
+    )
+
+
+def build_strategy_cache(experiments: list[dict[str, Any]]) -> dict[tuple[tuple[str, ...], tuple[int, ...], str, bool, bool], MAStrategy]:
+    cache: dict[tuple[tuple[str, ...], tuple[int, ...], str, bool, bool], MAStrategy] = {}
+    for experiment in experiments:
+        signature = strategy_cache_key(experiment)
+        if signature in cache:
+            continue
+        cache[signature] = MAStrategy(
+            ma_types=list(signature[0]),
+            ma_periods=list(signature[1]),
+            entry_type=signature[2],
+            allow_long=signature[3],
+            allow_short=signature[4],
+        )
+    return cache
+
+
+def collect_required_ma_keys(
+    strategies: dict[tuple[tuple[str, ...], tuple[int, ...], str, bool, bool], MAStrategy],
+) -> set[tuple[str, int]]:
+    required_keys: set[tuple[str, int]] = set()
+    for strategy in strategies.values():
+        required_keys.update(strategy.required_ma_keys())
+    return required_keys
+
+
 def remove_output_path(path: Path) -> None:
     if not path.exists():
         return
@@ -741,63 +795,83 @@ def main() -> None:
         print("No pending experiment configs. Resume is already up to date.")
         return
 
-    current_cache_key: tuple[str, str] | None = None
-    current_candles: pd.DataFrame | None = None
     result_buffer: list[dict[str, Any]] = []
     part_index = next_part_index(output_path)
+    pending_slices = group_experiments_by_slice(pending)
 
     try:
-        for index, experiment in enumerate(pending, start=1):
-            print(f"[{index}/{len(pending)}] {experiment_summary(experiment)}")
-            run_started_epoch = time.time()
-            run_started_at = now_iso()
-            try:
-                cache_key = (experiment["pair"], experiment["timeframe"])
-                if current_cache_key != cache_key or current_candles is None:
-                    current_candles = load_backtest_candles(
-                        data_root=data_root,
-                        pair=experiment["pair"],
-                        timeframe=experiment["timeframe"],
-                        start_date=experiment["start_date"],
-                        end_date=experiment["end_date"],
-                    )
-                    current_cache_key = cache_key
+        completed_runs = 0
+        for slice_index, (slice_key, slice_experiments) in enumerate(pending_slices, start=1):
+            pair, timeframe, start_date, end_date = slice_key
+            print(
+                f"Slice [{slice_index}/{len(pending_slices)}] "
+                f"{pair} {timeframe} {start_date}..{end_date} runs={len(slice_experiments)}"
+            )
 
-                strategy = MAStrategy(
-                    ma_types=experiment["ma_types"],
-                    ma_periods=experiment["ma_periods"],
-                    entry_type=experiment["entry_type"],
-                    allow_long=experiment["allow_long"],
-                    allow_short=experiment["allow_short"],
-                )
-                signals = strategy.generate_signals(current_candles)
-                config = build_backtest_config(experiment)
-                result = run_backtest(current_candles, signals, config)
-                run_dir = save_backtest_result(result, output_root)
-                metrics = validate_metrics_file(run_dir)
-                row = flatten_result(
-                    experiment,
-                    metrics,
-                    run_dir,
-                    run_started_at=run_started_at,
-                    run_duration_sec=time.time() - run_started_epoch,
-                )
-                result_buffer.append(row)
-                completed_hashes.add(experiment["config_hash"])
-                if len(result_buffer) >= args.flush_every:
-                    part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
-            except Exception as exc:
-                append_failed_run(
-                    failed_log_path,
-                    {
-                        "config_hash": experiment["config_hash"],
-                        "config": experiment,
-                        "error": str(exc),
-                        "timestamp": now_iso(),
-                        "traceback": traceback.format_exc(),
-                    },
-                )
-                print(f"  failed: {exc}")
+            load_started = time.time()
+            current_candles = load_backtest_candles(
+                data_root=data_root,
+                pair=pair,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            load_duration = time.time() - load_started
+
+            strategy_started = time.time()
+            strategies = build_strategy_cache(slice_experiments)
+            required_ma_keys = collect_required_ma_keys(strategies)
+            ma_cache = build_ma_cache(current_candles, required_ma_keys)
+            cache_duration = time.time() - strategy_started
+            print(
+                f"  loaded candles rows={len(current_candles)} load_sec={load_duration:.3f} "
+                f"ma_series={len(ma_cache)} ma_cache_sec={cache_duration:.3f}"
+            )
+
+            slice_run_duration = 0.0
+            for experiment in slice_experiments:
+                completed_runs += 1
+                print(f"[{completed_runs}/{len(pending)}] {experiment_summary(experiment)}")
+                run_started_epoch = time.time()
+                run_started_at = now_iso()
+                try:
+                    strategy = strategies[strategy_cache_key(experiment)]
+                    signals = strategy.generate_signals(current_candles, indicator_cache=ma_cache)
+                    config = build_backtest_config(experiment)
+                    result = run_backtest(current_candles, signals, config)
+                    run_dir = save_backtest_result(result, output_root)
+                    run_duration = time.time() - run_started_epoch
+                    metrics = validate_metrics_file(run_dir)
+                    row = flatten_result(
+                        experiment,
+                        metrics,
+                        run_dir,
+                        run_started_at=run_started_at,
+                        run_duration_sec=run_duration,
+                    )
+                    result_buffer.append(row)
+                    completed_hashes.add(experiment["config_hash"])
+                    slice_run_duration += run_duration
+                    if len(result_buffer) >= args.flush_every:
+                        part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
+                except Exception as exc:
+                    append_failed_run(
+                        failed_log_path,
+                        {
+                            "config_hash": experiment["config_hash"],
+                            "config": experiment,
+                            "error": str(exc),
+                            "timestamp": now_iso(),
+                            "traceback": traceback.format_exc(),
+                        },
+                    )
+                    print(f"  failed: {exc}")
+
+            average_run_duration = slice_run_duration / len(slice_experiments) if slice_experiments else 0.0
+            print(
+                f"  slice complete runs={len(slice_experiments)} "
+                f"avg_run_sec={average_run_duration:.3f} total_run_sec={slice_run_duration:.3f}"
+            )
     except KeyboardInterrupt:
         if result_buffer:
             part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
