@@ -52,7 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ma-periods", default=None, help="Comma-separated MA periods for ma_strategy, for example 20,50 or 10,20,50.")
     parser.add_argument("--entry-type", choices=["crossover", "price_above_all", "crossover_breakout"], default=None, help="Entry mode for ma_strategy.")
     parser.add_argument("--initial-capital", type=float, required=True, help="Initial capital.")
-    parser.add_argument("--fixed-position-size", type=float, required=True, help="Fixed position size.")
+    parser.add_argument("--fixed-position-size", type=float, default=1.0, help="Fixed position size used when position_sizing_mode=fixed.")
+    parser.add_argument("--position-sizing-mode", choices=["fixed", "risk_percent"], default="fixed", help="Position sizing mode.")
+    parser.add_argument("--risk-percent", type=float, default=None, help="Fraction of current capital to risk per trade when using risk_percent sizing.")
     parser.add_argument("--spread", type=float, default=0.0, help="Absolute spread in price units.")
     parser.add_argument("--slippage", type=float, default=0.0, help="Absolute slippage in price units.")
     parser.add_argument("--stop-loss", type=float, default=None, help="Stop-loss distance or ATR multiple, depending on stop-loss mode.")
@@ -140,6 +142,8 @@ def main() -> None:
             end_date=args.end_date,
             initial_capital=args.initial_capital,
             fixed_position_size=args.fixed_position_size,
+            position_sizing_mode=args.position_sizing_mode,
+            risk_percent=args.risk_percent,
             strategy_params=strategy_params,
             spread=args.spread,
             slippage=args.slippage,
@@ -181,8 +185,12 @@ def main() -> None:
         f"trades={metrics['total_trades']} "
         f"win_rate={metrics['win_rate']:.2%} "
         f"net_pnl={metrics['net_pnl']:.6f} "
+        f"final_capital={metrics['final_capital']:.6f} "
+        f"total_return_pct={metrics['total_return_pct']:.2f} "
         f"profit_factor={metrics['profit_factor']} "
         f"max_drawdown={metrics['max_drawdown']:.6f} "
+        f"position_sizing_mode={config.position_sizing_mode} "
+        f"risk_percent={config.risk_percent if config.position_sizing_mode == 'risk_percent' else 'n/a'} "
         f"stop_loss={config.stop_loss} "
         f"take_profit={config.take_profit} "
         f"stop_loss_mode={config.stop_loss_mode} "

@@ -16,7 +16,10 @@ class BacktestConfig:
     start_date: str
     end_date: str
     initial_capital: float
-    fixed_position_size: float
+    fixed_position_size: float | None = None
+    position_sizing_mode: str = "fixed"
+    risk_percent: float | None = None
+    account_currency: str = "USD"
     strategy_params: dict[str, Any] = field(default_factory=dict)
     spread: float = 0.0
     slippage: float = 0.0
@@ -68,6 +71,11 @@ class TradeRecord:
     outcome: str | None = None
     strategy_name: str | None = None
     notes: str | None = None
+    position_size_used: float | None = None
+    capital_before: float | None = None
+    capital_after: float | None = None
+    risk_amount: float | None = None
+    stop_distance_at_entry: float | None = None
     atr_at_entry: float | None = None
     trailing_stop_initial: float | None = None
     trailing_stop_final: float | None = None

@@ -31,6 +31,7 @@ def make_results_frame() -> pd.DataFrame:
                 "max_drawdown": -0.10,
                 "win_rate": 0.45,
                 "net_pnl": 0.20,
+                "final_capital": 120.25,
             },
             {
                 "strategy": "b",
@@ -45,6 +46,7 @@ def make_results_frame() -> pd.DataFrame:
                 "max_drawdown": -0.20,
                 "win_rate": 0.35,
                 "net_pnl": 0.10,
+                "final_capital": 110.10,
             },
             {
                 "strategy": "c",
@@ -59,6 +61,7 @@ def make_results_frame() -> pd.DataFrame:
                 "max_drawdown": -0.05,
                 "win_rate": 0.60,
                 "net_pnl": 0.30,
+                "final_capital": 130.00,
             },
             {
                 "strategy": "d",
@@ -73,6 +76,7 @@ def make_results_frame() -> pd.DataFrame:
                 "max_drawdown": -0.08,
                 "win_rate": 0.50,
                 "net_pnl": 0.05,
+                "final_capital": 105.00,
             },
         ]
     )
@@ -234,6 +238,18 @@ def test_build_display_frame_reduces_and_formats_output() -> None:
     assert display.loc[0, "win_rate"] == 45.0
     assert display.loc[0, "profit_factor"] == 1.5
     assert display.loc[0, "rd_ratio"] == 2.0
+    assert display.loc[0, "final_capital"] == 120.25
+
+
+def test_build_display_frame_handles_missing_numeric_values() -> None:
+    shortlist = make_results_frame().head(1).copy()
+    shortlist["rd_ratio"] = pd.NA
+    shortlist["final_capital"] = pd.NA
+
+    display = MODULE.build_display_frame(shortlist)
+
+    assert pd.isna(display.loc[0, "rd_ratio"])
+    assert pd.isna(display.loc[0, "final_capital"])
 
 
 def test_output_file_is_created_when_requested(tmp_path: Path) -> None:

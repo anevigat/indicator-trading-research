@@ -94,6 +94,9 @@ DEFAULT_BACKTEST_SETTINGS: dict[str, Any] = {
     "end_date": "2025-12-31",
     "initial_capital": 10_000.0,
     "fixed_position_size": 1.0,
+    "position_sizing_mode": "fixed",
+    "risk_percent": None,
+    "account_currency": "USD",
     "spread": 0.0001,
     "slippage": 0.00002,
     "fee_per_trade": 0.0,
@@ -212,6 +215,9 @@ RESULT_COLUMNS = [
     "end_date",
     "initial_capital",
     "fixed_position_size",
+    "position_sizing_mode",
+    "risk_percent",
+    "account_currency",
     "spread",
     "slippage",
     "fee_per_trade",
@@ -248,6 +254,8 @@ RESULT_COLUMNS = [
     "output_path",
     "run_started_at",
     "run_duration_sec",
+    "final_capital",
+    "total_return_pct",
     "total_trades",
     "gross_pnl",
     "net_pnl",
@@ -257,8 +265,11 @@ RESULT_COLUMNS = [
     "profit_factor",
     "expectancy",
     "max_drawdown",
+    "max_drawdown_pct",
     "ending_equity",
     "average_trade_duration_bars",
+    "average_risk_amount",
+    "average_position_size_used",
     "long_trades_count",
     "short_trades_count",
     "stop_loss_exits",
@@ -337,6 +348,10 @@ def experiment_hash(config: dict[str, Any], version: str) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _has_entry_time_stop_provider(config: dict[str, Any]) -> bool:
+    return config.get("stop_loss") is not None or bool(config.get("ma_stop"))
+
+
 def build_experiment_config(
     *,
     pair: str,
@@ -408,6 +423,9 @@ def build_experiment_config(
         "strategy": config["strategy"],
         "initial_capital": config["initial_capital"],
         "fixed_position_size": config["fixed_position_size"],
+        "position_sizing_mode": config.get("position_sizing_mode", "fixed"),
+        "risk_percent": config.get("risk_percent"),
+        "account_currency": config.get("account_currency", "USD"),
         "spread": config["spread"],
         "slippage": config["slippage"],
         "fee_per_trade": config["fee_per_trade"],
@@ -457,7 +475,7 @@ def iter_experiment_configs(
                         for exit_profile in exit_profiles:
                             if exit_profile in {"atr_trailing", "atr_trailing_be"}:
                                 for trailing_type in sorted(TRAILING_TYPES):
-                                    yield build_experiment_config(
+                                    config = build_experiment_config(
                                         pair=pair,
                                         timeframe=timeframe,
                                         ma_types=ma_types,
@@ -469,8 +487,11 @@ def iter_experiment_configs(
                                         end_date=end_date,
                                         experiment_version=experiment_version,
                                     )
+                                    if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                        continue
+                                    yield config
                             else:
-                                yield build_experiment_config(
+                                config = build_experiment_config(
                                     pair=pair,
                                     timeframe=timeframe,
                                     ma_types=ma_types,
@@ -482,6 +503,9 @@ def iter_experiment_configs(
                                     end_date=end_date,
                                     experiment_version=experiment_version,
                                 )
+                                if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                    continue
+                                yield config
             for ma_periods in sorted(MA_PERIODS_3):
                 for ma_types in sorted(MA_TYPES_3):
                     for entry_type in sorted(ENTRY_TYPES_3):
@@ -490,7 +514,7 @@ def iter_experiment_configs(
                         for exit_profile in exit_profiles:
                             if exit_profile in {"atr_trailing", "atr_trailing_be"}:
                                 for trailing_type in sorted(TRAILING_TYPES):
-                                    yield build_experiment_config(
+                                    config = build_experiment_config(
                                         pair=pair,
                                         timeframe=timeframe,
                                         ma_types=ma_types,
@@ -502,8 +526,11 @@ def iter_experiment_configs(
                                         end_date=end_date,
                                         experiment_version=experiment_version,
                                     )
+                                    if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                        continue
+                                    yield config
                             else:
-                                yield build_experiment_config(
+                                config = build_experiment_config(
                                     pair=pair,
                                     timeframe=timeframe,
                                     ma_types=ma_types,
@@ -515,6 +542,9 @@ def iter_experiment_configs(
                                     end_date=end_date,
                                     experiment_version=experiment_version,
                                 )
+                                if config.get("position_sizing_mode") == "risk_percent" and not _has_entry_time_stop_provider(config):
+                                    continue
+                                yield config
 
 
 def dataset_slice_key(experiment: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -602,6 +632,23 @@ def load_completed_hashes(output_path: Path) -> set[str]:
     return set(table.column("config_hash").to_pylist())
 
 
+def load_failed_hashes(failed_log_path: Path) -> set[str]:
+    if not failed_log_path.exists():
+        return set()
+    hashes: set[str] = set()
+    for line in failed_log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        config_hash = payload.get("config_hash")
+        if isinstance(config_hash, str) and config_hash:
+            hashes.add(config_hash)
+    return hashes
+
+
 def next_part_index(output_path: Path) -> int:
     if not output_path.exists():
         return 0
@@ -641,6 +688,9 @@ def build_backtest_config(experiment: dict[str, Any]) -> BacktestConfig:
         end_date=experiment["end_date"],
         initial_capital=experiment["initial_capital"],
         fixed_position_size=experiment["fixed_position_size"],
+        position_sizing_mode=experiment.get("position_sizing_mode", "fixed"),
+        risk_percent=experiment.get("risk_percent"),
+        account_currency=experiment.get("account_currency", "USD"),
         strategy_params={
             "ma_types": experiment["ma_types"],
             "ma_periods": experiment["ma_periods"],
@@ -698,6 +748,9 @@ def flatten_result(experiment: dict[str, Any], metrics: dict[str, Any], output_p
         "end_date": experiment["end_date"],
         "initial_capital": experiment["initial_capital"],
         "fixed_position_size": experiment["fixed_position_size"],
+        "position_sizing_mode": experiment.get("position_sizing_mode", "fixed"),
+        "risk_percent": experiment.get("risk_percent"),
+        "account_currency": experiment.get("account_currency", "USD"),
         "spread": experiment["spread"],
         "slippage": experiment["slippage"],
         "fee_per_trade": experiment["fee_per_trade"],
@@ -736,7 +789,7 @@ def flatten_result(experiment: dict[str, Any], metrics: dict[str, Any], output_p
         "run_duration_sec": float(run_duration_sec),
     }
     row.update(metrics)
-    return row
+    return {column: row.get(column) for column in RESULT_COLUMNS}
 
 
 def experiment_summary(experiment: dict[str, Any]) -> str:
@@ -771,8 +824,6 @@ def main() -> None:
     if args.overwrite_results:
         remove_output_path(output_path)
 
-    completed_hashes = load_completed_hashes(output_path)
-
     experiments = list(
         iter_experiment_configs(
             pairs=pairs,
@@ -783,12 +834,16 @@ def main() -> None:
             experiment_version=args.experiment_version,
         )
     )
-    pending = [experiment for experiment in experiments if experiment["config_hash"] not in completed_hashes]
+    experiment_hashes = {experiment["config_hash"] for experiment in experiments}
+    completed_hashes = load_completed_hashes(output_path) & experiment_hashes
+    failed_hashes = load_failed_hashes(failed_log_path) & experiment_hashes
+    attempted_hashes = completed_hashes | failed_hashes
+    pending = [experiment for experiment in experiments if experiment["config_hash"] not in attempted_hashes]
     if args.max_runs is not None:
         pending = pending[: args.max_runs]
 
     print(
-        f"Experiment matrix: total={len(experiments)} completed={len(completed_hashes)} pending={len(pending)} "
+        f"Experiment matrix: total={len(experiments)} completed={len(completed_hashes)} failed={len(failed_hashes)} pending={len(pending)} "
         f"output={output_path} version={args.experiment_version}"
     )
     if not pending:

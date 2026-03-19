@@ -40,6 +40,9 @@ def build_config(**overrides: object) -> BacktestConfig:
         "end_date": "2025-01-02",
         "initial_capital": 10_000.0,
         "fixed_position_size": 1.0,
+        "position_sizing_mode": "fixed",
+        "risk_percent": None,
+        "account_currency": "USD",
         "spread": 0.0,
         "slippage": 0.0,
         "fee_per_trade": 0.0,
@@ -366,4 +369,101 @@ def test_invalid_atr_method_in_engine_config_fails_clearly() -> None:
     config = build_config(stop_loss_mode="atr", stop_loss=1.0, atr_method="bad_method")
 
     with pytest.raises(ValueError, match="Unsupported atr_method"):
+        run_backtest(candles, signals, config)
+
+
+def test_fixed_position_size_mode_keeps_existing_size_behavior() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 1.1000, 1.1002, 1.0998, 1.1000),
+            ("2025-01-01T00:15:00Z", 1.1010, 1.1015, 1.1009, 1.1012),
+            ("2025-01-01T00:30:00Z", 1.1020, 1.1024, 1.1018, 1.1021),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:00:00Z", 1)])
+    config = build_config(fixed_position_size=2.5)
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    assert trade["position_size_used"] == pytest.approx(2.5)
+    assert trade["capital_before"] == pytest.approx(10_000.0)
+
+
+def test_risk_percent_position_size_uses_capital_and_stop_distance() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 1.1000, 1.1002, 1.0998, 1.1000),
+            ("2025-01-01T00:15:00Z", 1.1000, 1.1006, 1.0994, 1.1003),
+            ("2025-01-01T00:30:00Z", 1.1008, 1.1010, 1.1004, 1.1009),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:00:00Z", 1)])
+    config = build_config(
+        initial_capital=100.0,
+        fixed_position_size=1.0,
+        position_sizing_mode="risk_percent",
+        risk_percent=0.01,
+        stop_loss_mode="absolute",
+        stop_loss=0.0020,
+    )
+
+    result = run_backtest(candles, signals, config)
+
+    trade = result.trades.iloc[0]
+    expected_risk = 1.0
+    expected_size = expected_risk / 0.0020
+    assert trade["risk_amount"] == pytest.approx(expected_risk)
+    assert trade["stop_distance_at_entry"] == pytest.approx(0.0020)
+    assert trade["position_size_used"] == pytest.approx(expected_size)
+
+
+def test_risk_percent_capital_compounds_between_trades() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 10.0, 10.0, 10.0, 10.0),
+            ("2025-01-01T00:15:00Z", 10.0, 11.5, 9.9, 11.2),
+            ("2025-01-01T00:30:00Z", 11.0, 11.0, 11.0, 11.0),
+            ("2025-01-01T00:45:00Z", 11.0, 12.5, 10.9, 12.2),
+            ("2025-01-01T01:00:00Z", 12.0, 12.0, 12.0, 12.0),
+        ]
+    )
+    signals = build_signals(
+        [
+            ("2025-01-01T00:00:00Z", 1),
+            ("2025-01-01T00:30:00Z", 1),
+        ]
+    )
+    config = build_config(
+        initial_capital=100.0,
+        position_sizing_mode="risk_percent",
+        risk_percent=0.01,
+        stop_loss_mode="absolute",
+        stop_loss=1.0,
+        take_profit_mode="absolute",
+        take_profit=1.0,
+    )
+
+    result = run_backtest(candles, signals, config)
+
+    first_trade = result.trades.iloc[0]
+    second_trade = result.trades.iloc[1]
+    assert first_trade["capital_before"] == pytest.approx(100.0)
+    assert first_trade["capital_after"] == pytest.approx(101.0)
+    assert second_trade["capital_before"] == pytest.approx(101.0)
+    assert second_trade["risk_amount"] == pytest.approx(1.01)
+    assert result.metrics["final_capital"] == pytest.approx(float(second_trade["capital_after"]))
+
+
+def test_risk_percent_requires_entry_time_stop_provider() -> None:
+    candles = build_candles(
+        [
+            ("2025-01-01T00:00:00Z", 1.1000, 1.1001, 1.0999, 1.1000),
+            ("2025-01-01T00:15:00Z", 1.1005, 1.1006, 1.1004, 1.1005),
+        ]
+    )
+    signals = build_signals([("2025-01-01T00:00:00Z", 1)])
+    config = build_config(position_sizing_mode="risk_percent", risk_percent=0.01, stop_loss=None, stop_loss_mode=None)
+
+    with pytest.raises(ValueError, match="entry-time stop"):
         run_backtest(candles, signals, config)

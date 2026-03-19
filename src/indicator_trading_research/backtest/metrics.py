@@ -14,7 +14,11 @@ def _safe_float(value: float | int | None) -> float:
 def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, initial_capital: float) -> dict[str, float | int | None]:
     if trades.empty:
         ending_equity = float(equity_curve["equity"].iloc[-1]) if not equity_curve.empty else float(initial_capital)
+        final_capital = float(equity_curve["capital"].iloc[-1]) if not equity_curve.empty and "capital" in equity_curve.columns else float(initial_capital)
         return {
+            "initial_capital": float(initial_capital),
+            "final_capital": final_capital,
+            "total_return_pct": 0.0,
             "total_trades": 0,
             "gross_pnl": 0.0,
             "net_pnl": 0.0,
@@ -24,8 +28,11 @@ def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, i
             "profit_factor": 0.0,
             "expectancy": 0.0,
             "max_drawdown": 0.0,
+            "max_drawdown_pct": 0.0,
             "ending_equity": ending_equity,
             "average_trade_duration_bars": 0.0,
+            "average_risk_amount": 0.0,
+            "average_position_size_used": 0.0,
             "long_trades_count": 0,
             "short_trades_count": 0,
             "stop_loss_exits": 0,
@@ -54,14 +61,31 @@ def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, i
     if equity_curve.empty:
         max_drawdown = 0.0
         ending_equity = initial_capital + net_pnl
+        max_drawdown_pct = 0.0
+        final_capital = ending_equity
     else:
         running_peak = equity_curve["equity"].cummax()
         drawdown = equity_curve["equity"] - running_peak
         max_drawdown = float(drawdown.min())
         ending_equity = float(equity_curve["equity"].iloc[-1])
+        drawdown_pct = (equity_curve["equity"] / running_peak.replace(0, pd.NA)) - 1.0
+        max_drawdown_pct = float(drawdown_pct.min()) if not drawdown_pct.empty else 0.0
+        if "capital" in equity_curve.columns:
+            final_capital = float(equity_curve["capital"].iloc[-1])
+        else:
+            final_capital = ending_equity
 
     duration = float(trades["duration_bars"].mean()) if "duration_bars" in trades.columns and not trades.empty else 0.0
+    average_risk_amount = float(trades["risk_amount"].dropna().mean()) if "risk_amount" in trades.columns and trades["risk_amount"].notna().any() else 0.0
+    average_position_size_used = (
+        float(trades["position_size_used"].dropna().mean())
+        if "position_size_used" in trades.columns and trades["position_size_used"].notna().any()
+        else 0.0
+    )
     return {
+        "initial_capital": float(initial_capital),
+        "final_capital": final_capital,
+        "total_return_pct": float(((final_capital - initial_capital) / initial_capital) * 100.0) if initial_capital else 0.0,
         "total_trades": int(len(trades)),
         "gross_pnl": gross_pnl,
         "net_pnl": net_pnl,
@@ -71,8 +95,11 @@ def compute_backtest_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, i
         "profit_factor": profit_factor,
         "expectancy": float(net_pnl / len(trades)) if len(trades) else 0.0,
         "max_drawdown": max_drawdown,
+        "max_drawdown_pct": max_drawdown_pct,
         "ending_equity": ending_equity,
         "average_trade_duration_bars": duration,
+        "average_risk_amount": average_risk_amount,
+        "average_position_size_used": average_position_size_used,
         "long_trades_count": int((trades["side"] == "long").sum()),
         "short_trades_count": int((trades["side"] == "short").sum()),
         "stop_loss_exits": int((trades["exit_reason"] == "stop_loss").sum()) if "exit_reason" in trades.columns else 0,
