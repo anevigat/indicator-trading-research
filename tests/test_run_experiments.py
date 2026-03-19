@@ -442,6 +442,10 @@ def test_workers_one_and_two_produce_same_schema_and_hashes(tmp_path: Path) -> N
 
     assert "workers=1" in single.stdout
     assert "workers=2" in worker.stdout
+    assert "[1/5]" in single.stdout
+    assert "win_rate=" in single.stdout
+    assert "profit_factor=" in single.stdout
+    assert "final_capital=" in single.stdout
 
     single_frame = pd.read_parquet(single_output)
     worker_frame = pd.read_parquet(worker_output)

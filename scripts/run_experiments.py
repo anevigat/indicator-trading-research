@@ -587,6 +587,22 @@ def group_experiments_by_slice(
     return list(grouped.items())
 
 
+def annotate_pending_slices(
+    pending_slices: list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]],
+    *,
+    total_pending: int,
+) -> list[tuple[tuple[str, str, str, str], list[tuple[int, int, dict[str, Any]]]]]:
+    annotated: list[tuple[tuple[str, str, str, str], list[tuple[int, int, dict[str, Any]]]]] = []
+    ordinal = 0
+    for slice_key, slice_experiments in pending_slices:
+        slice_items: list[tuple[int, int, dict[str, Any]]] = []
+        for experiment in slice_experiments:
+            ordinal += 1
+            slice_items.append((ordinal, total_pending, experiment))
+        annotated.append((slice_key, slice_items))
+    return annotated
+
+
 def strategy_cache_key(experiment: dict[str, Any]) -> tuple[tuple[str, ...], tuple[int, ...], str, bool, bool]:
     return (
         tuple(experiment["ma_types"]),
@@ -834,6 +850,35 @@ def slice_summary(slice_key: tuple[str, str, str, str]) -> str:
     return f"{pair} {timeframe} {start_date}..{end_date}"
 
 
+def format_experiment_result_line(
+    *,
+    ordinal: int,
+    total: int,
+    experiment: dict[str, Any],
+    metrics: dict[str, Any],
+) -> str:
+    win_rate = metrics.get("win_rate")
+    final_capital = metrics.get("final_capital")
+    return (
+        f"[{ordinal}/{total}] {experiment_summary(experiment)} "
+        f"win_rate={float(win_rate) * 100:.2f}% "
+        f"profit_factor={float(metrics.get('profit_factor', 0.0)):.3f} "
+        f"final_capital={float(final_capital):.2f}"
+        if win_rate is not None and final_capital is not None
+        else f"[{ordinal}/{total}] {experiment_summary(experiment)} completed"
+    )
+
+
+def format_experiment_failure_line(
+    *,
+    ordinal: int,
+    total: int,
+    experiment: dict[str, Any],
+    error: str,
+) -> str:
+    return f"[{ordinal}/{total}] {experiment_summary(experiment)} failed: {error}"
+
+
 def _failure_payload(
     *,
     experiment: dict[str, Any],
@@ -858,9 +903,9 @@ def _failure_payload(
 
 
 def run_slice_worker(
-    work_item: tuple[tuple[str, str, str, str], list[dict[str, Any]], str, str],
+    work_item: tuple[tuple[str, str, str, str], list[tuple[int, int, dict[str, Any]]], str, str],
 ) -> dict[str, Any]:
-    slice_key, slice_experiments, data_root_str, output_root_str = work_item
+    slice_key, slice_items, data_root_str, output_root_str = work_item
     pair, timeframe, start_date, end_date = slice_key
     slice_started = time.time()
     rows: list[dict[str, Any]] = []
@@ -881,12 +926,18 @@ def run_slice_worker(
         load_duration = time.time() - load_started
 
         cache_started = time.time()
+        slice_experiments = [experiment for _, _, experiment in slice_items]
         strategies = build_strategy_cache(slice_experiments)
         required_ma_keys = collect_required_ma_keys(strategies)
         ma_cache = build_ma_cache(current_candles, required_ma_keys)
         cache_duration = time.time() - cache_started
+        print(
+            f"Worker ready {slice_summary(slice_key)} runs={len(slice_items)} "
+            f"rows={len(current_candles)} load_sec={load_duration:.3f} ma_cache_sec={cache_duration:.3f}",
+            flush=True,
+        )
 
-        for experiment in slice_experiments:
+        for ordinal, total, experiment in slice_items:
             run_started_epoch = time.time()
             run_started_at = now_iso()
             try:
@@ -907,6 +958,15 @@ def run_slice_worker(
                     )
                 )
                 run_duration_total += run_duration
+                print(
+                    format_experiment_result_line(
+                        ordinal=ordinal,
+                        total=total,
+                        experiment=experiment,
+                        metrics=metrics,
+                    ),
+                    flush=True,
+                )
             except Exception as exc:
                 failures.append(
                     _failure_payload(
@@ -916,10 +976,19 @@ def run_slice_worker(
                         slice_key=slice_key,
                     )
                 )
+                print(
+                    format_experiment_failure_line(
+                        ordinal=ordinal,
+                        total=total,
+                        experiment=experiment,
+                        error=str(exc),
+                    ),
+                    flush=True,
+                )
     except Exception as exc:
         error_text = f"slice worker failed for {slice_summary(slice_key)}: {exc}"
         traceback_text = traceback.format_exc()
-        for experiment in slice_experiments:
+        for ordinal, total, experiment in slice_items:
             failures.append(
                 _failure_payload(
                     experiment=experiment,
@@ -928,12 +997,21 @@ def run_slice_worker(
                     slice_key=slice_key,
                 )
             )
+            print(
+                format_experiment_failure_line(
+                    ordinal=ordinal,
+                    total=total,
+                    experiment=experiment,
+                    error=error_text,
+                ),
+                flush=True,
+            )
 
     total_duration = time.time() - slice_started
-    average_run_duration = run_duration_total / len(slice_experiments) if slice_experiments else 0.0
+    average_run_duration = run_duration_total / len(slice_items) if slice_items else 0.0
     return {
         "slice_key": slice_key,
-        "config_count": len(slice_experiments),
+        "config_count": len(slice_items),
         "rows": rows,
         "failures": failures,
         "load_duration_sec": load_duration,
@@ -990,12 +1068,13 @@ def run_pending_slices(
     total_configs = sum(len(slice_experiments) for _, slice_experiments in pending_slices)
     completed_configs = 0
     completed_slices = 0
+    annotated_slices = annotate_pending_slices(pending_slices, total_pending=total_configs)
 
     try:
         if workers == 1:
-            for slice_key, slice_experiments in pending_slices:
-                print(f"Slice start [{completed_slices + 1}/{len(pending_slices)}] {slice_summary(slice_key)} runs={len(slice_experiments)}")
-                payload = run_slice_worker((slice_key, slice_experiments, str(data_root), str(output_root)))
+            for slice_key, slice_items in annotated_slices:
+                print(f"Slice start [{completed_slices + 1}/{len(pending_slices)}] {slice_summary(slice_key)} runs={len(slice_items)}")
+                payload = run_slice_worker((slice_key, slice_items, str(data_root), str(output_root)))
                 completed_slices += 1
                 completed_configs += payload["config_count"]
                 part_index, _ = handle_completed_slice(
@@ -1014,9 +1093,13 @@ def run_pending_slices(
             start_method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
             mp_context = multiprocessing.get_context(start_method)
             work_items = [
-                (slice_key, slice_experiments, str(data_root), str(output_root))
-                for slice_key, slice_experiments in pending_slices
+                (slice_key, slice_items, str(data_root), str(output_root))
+                for slice_key, slice_items in annotated_slices
             ]
+            for slice_key, slice_items in annotated_slices:
+                print(f"Slice start [{completed_slices + 1}/{len(annotated_slices)}] {slice_summary(slice_key)} runs={len(slice_items)}")
+                completed_slices += 1
+            completed_slices = 0
             with mp_context.Pool(processes=workers) as pool:
                 for payload in pool.imap_unordered(run_slice_worker, work_items):
                     completed_slices += 1
