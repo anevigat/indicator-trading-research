@@ -41,6 +41,30 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
     assert all(config["position_sizing_mode"] == "fixed" for config in configs)
 
 
+def test_group_experiments_by_slice_preserves_order_and_hashes() -> None:
+    configs = list(
+        MODULE.iter_experiment_configs(
+            pairs=["USDJPY", "EURUSD"],
+            timeframes=["4h", "1h"],
+            exit_profiles=["none"],
+            start_date="2025-01-01",
+            end_date="2025-02-15",
+            experiment_version="v1",
+        )
+    )
+
+    grouped = MODULE.group_experiments_by_slice(configs)
+
+    grouped_hashes = [config["config_hash"] for _, slice_configs in grouped for config in slice_configs]
+    assert grouped_hashes == [config["config_hash"] for config in configs]
+    assert [slice_key[:2] for slice_key, _ in grouped] == [
+        ("EURUSD", "1h"),
+        ("EURUSD", "4h"),
+        ("USDJPY", "1h"),
+        ("USDJPY", "4h"),
+    ]
+
+
 def test_experiment_hash_changes_when_version_changes() -> None:
     config = {"pair": "EURUSD", "timeframe": "1h", "ma_types": ["ema", "sma"], "ma_periods": [20, 50]}
 
@@ -109,6 +133,40 @@ def test_resume_skips_preexisting_config_hashes(tmp_path: Path) -> None:
 
     assert len(pending) == len(configs) - 1
     assert all(config["config_hash"] != existing_hash for config in pending)
+
+def test_build_strategy_cache_collects_unique_strategies_and_ma_keys() -> None:
+    configs = [
+        MODULE.build_experiment_config(
+            pair="EURUSD",
+            timeframe="1h",
+            ma_types=("ema", "sma"),
+            ma_periods=(20, 50),
+            entry_type="crossover",
+            exit_profile="none",
+            trailing_type=None,
+            start_date="2025-01-01",
+            end_date="2025-02-15",
+            experiment_version="v1",
+        ),
+        MODULE.build_experiment_config(
+            pair="EURUSD",
+            timeframe="1h",
+            ma_types=("ema", "sma"),
+            ma_periods=(20, 50),
+            entry_type="crossover_breakout",
+            exit_profile="fixed1010",
+            trailing_type=None,
+            start_date="2025-01-01",
+            end_date="2025-02-15",
+            experiment_version="v1",
+        ),
+    ]
+
+    strategies = MODULE.build_strategy_cache(configs)
+    required_ma_keys = MODULE.collect_required_ma_keys(strategies)
+
+    assert len(strategies) == 2
+    assert required_ma_keys == {("ema", 20), ("sma", 50)}
 
 
 def test_load_failed_hashes_reads_hashes_from_jsonl(tmp_path: Path) -> None:
@@ -197,3 +255,51 @@ def test_parse_args_defaults_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
     args = MODULE.parse_args()
 
     assert args.data_root == "data/processed"
+
+
+def test_flatten_result_keeps_expected_schema_columns() -> None:
+    experiment = MODULE.build_experiment_config(
+        pair="EURUSD",
+        timeframe="1h",
+        ma_types=("ema", "sma"),
+        ma_periods=(20, 50),
+        entry_type="crossover",
+        exit_profile="none",
+        trailing_type=None,
+        start_date="2025-01-01",
+        end_date="2025-02-15",
+        experiment_version="v1",
+    )
+    metrics = {
+        "total_trades": 10,
+        "gross_pnl": 1.0,
+        "net_pnl": 0.9,
+        "win_rate": 0.5,
+        "average_win": 0.2,
+        "average_loss": -0.1,
+        "profit_factor": 1.5,
+        "expectancy": 0.09,
+        "max_drawdown": -0.2,
+        "ending_equity": 10000.9,
+        "average_trade_duration_bars": 3.0,
+        "long_trades_count": 5,
+        "short_trades_count": 5,
+        "stop_loss_exits": 1,
+        "trailing_stop_exits": 0,
+        "chandelier_trailing_exits": 0,
+        "break_even_exits": 0,
+        "ma_stop_exits": 0,
+        "take_profit_exits": 1,
+        "signal_exits": 8,
+        "forced_end_exits": 0,
+    }
+
+    row = MODULE.flatten_result(
+        experiment,
+        metrics,
+        Path("/tmp/run"),
+        run_started_at="2026-01-01T00:00:00+00:00",
+        run_duration_sec=1.23,
+    )
+
+    assert set(MODULE.RESULT_COLUMNS).issubset(row.keys())

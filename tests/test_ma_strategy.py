@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from indicator_trading_research.strategies import MAStrategy, compute_ma
+from indicator_trading_research.strategies import MAStrategy, build_ma_cache, compute_ma
 
 
 def build_candles(closes: list[float]) -> pd.DataFrame:
@@ -162,6 +162,21 @@ def test_hma_sma_crossover_breakout_is_supported() -> None:
     signals = strategy.generate_signals(candles)
     assert {"ma_1", "ma_2", "ma_fast", "ma_slow", "signal"}.issubset(signals.columns)
     assert len(signals) == len(candles)
+
+
+def test_generate_signals_with_precomputed_cache_matches_direct_computation() -> None:
+    candles = build_candles([7.0, 6.0, 5.0, 4.0, 5.0, 7.0, 9.0, 8.0, 7.0, 6.0])
+    strategy = MAStrategy(
+        ma_types=["hma", "sma", "ema"],
+        ma_periods=[3, 5, 4],
+        entry_type="price_above_all",
+    )
+
+    direct = strategy.generate_signals(candles)
+    cache = build_ma_cache(candles, strategy.required_ma_keys())
+    cached = strategy.generate_signals(candles, indicator_cache=cache)
+
+    pd.testing.assert_frame_equal(direct, cached)
 
 
 @pytest.mark.parametrize(

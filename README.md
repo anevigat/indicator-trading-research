@@ -736,6 +736,8 @@ Production-mode behavior:
 - failures are appended to `failed_runs.jsonl` with config, error, and timestamp
 - successful rows are buffered and flushed in chunks instead of rewriting the full parquet dataset on every run
 - resume loads only `config_hash` values from the existing dataset and skips completed configs automatically
+- Phase P1 remains single-process, but now groups execution by dataset slice so each `(pair, timeframe, date window)` candle set is loaded once per slice
+- Phase P1 also precomputes and reuses MA series (`sma`, `ema`, `wma`, `hma`) within a dataset slice instead of recomputing the same indicators for each nearby config
 
 Output schema includes:
 
