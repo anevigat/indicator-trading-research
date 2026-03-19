@@ -43,6 +43,7 @@ SUPPORTED_PROTECTION_MODES = {"absolute", "atr"}
 SUPPORTED_ATR_METHODS = {"wilder", "sma", "ema"}
 SUPPORTED_TRAILING_TYPES = {"standard", "chandelier"}
 SUPPORTED_MA_STOP_SOURCES = {"short", "long"}
+SUPPORTED_POSITION_SIZING_MODES = {"fixed", "risk_percent"}
 
 
 @dataclass
@@ -65,6 +66,9 @@ class OpenPosition:
     high_since_entry: float
     low_since_entry: float
     size: float
+    capital_before: float
+    risk_amount: float | None
+    stop_distance_at_entry: float | None
     strategy_name: str
     entry_bar_index: int
 
@@ -122,8 +126,26 @@ def _validate_atr_settings(period: int, method: str, *, period_name: str, method
 
 
 def _validate_config(config: BacktestConfig) -> None:
-    if config.fixed_position_size <= 0:
-        raise ValueError("fixed_position_size must be positive.")
+    config.position_sizing_mode = (config.position_sizing_mode or "fixed").strip().lower()
+    if config.position_sizing_mode not in SUPPORTED_POSITION_SIZING_MODES:
+        supported = ", ".join(sorted(SUPPORTED_POSITION_SIZING_MODES))
+        raise ValueError(
+            f"Unsupported position_sizing_mode: {config.position_sizing_mode!r}. Supported modes: {supported}."
+        )
+    if config.initial_capital <= 0:
+        raise ValueError("initial_capital must be positive.")
+    if config.position_sizing_mode == "fixed":
+        if config.fixed_position_size is None or config.fixed_position_size <= 0:
+            raise ValueError("fixed_position_size must be positive when position_sizing_mode='fixed'.")
+        config.risk_percent = None if config.risk_percent is None else config.risk_percent
+    else:
+        if config.risk_percent is None or config.risk_percent <= 0:
+            raise ValueError("risk_percent must be positive when position_sizing_mode='risk_percent'.")
+        has_entry_stop_provider = config.stop_loss is not None or config.ma_stop
+        if not has_entry_stop_provider:
+            raise ValueError(
+                "position_sizing_mode='risk_percent' requires an entry-time stop from stop_loss or ma_stop."
+            )
     if config.spread < 0:
         raise ValueError("spread must be zero or positive.")
     if config.slippage < 0:
@@ -216,6 +238,59 @@ def _validate_config(config: BacktestConfig) -> None:
             raise ValueError("break_even_buffer_mode='atr' requires break_even_buffer to be set.")
         if config.ma_stop_buffer_mode == "atr" and config.ma_stop_buffer is None:
             raise ValueError("ma_stop_buffer_mode='atr' requires ma_stop_buffer to be set.")
+
+
+def _compute_ma_stop_from_value(side: str, ma_value: float | None, config: BacktestConfig, *, atr_value: float | None) -> float | None:
+    if not config.ma_stop or ma_value is None or pd.isna(ma_value):
+        return None
+    buffer_distance = _ma_stop_buffer_distance(config, atr_value)
+    if buffer_distance is None:
+        return None
+    return ma_value - buffer_distance if side == "long" else ma_value + buffer_distance
+
+
+def _initial_stop_price(side: str, stop_loss: float | None, ma_stop_price: float | None) -> float | None:
+    candidates = [value for value in (stop_loss, ma_stop_price) if value is not None]
+    if not candidates:
+        return None
+    return max(candidates) if side == "long" else min(candidates)
+
+
+def _stop_distance_at_entry(entry_price: float, stop_price: float | None) -> float | None:
+    if stop_price is None:
+        return None
+    distance = abs(entry_price - stop_price)
+    if distance <= 0:
+        return None
+    return distance
+
+
+def _position_size_and_risk(
+    *,
+    config: BacktestConfig,
+    capital_before: float,
+    stop_distance_at_entry: float | None,
+) -> tuple[float | None, float | None]:
+    if config.position_sizing_mode == "fixed":
+        size = float(config.fixed_position_size or 0.0)
+        if size <= 0:
+            raise ValueError("fixed_position_size must be positive when position_sizing_mode='fixed'.")
+        risk_amount = stop_distance_at_entry * size if stop_distance_at_entry is not None else None
+        return size, risk_amount
+
+    if capital_before <= 0:
+        return None, None
+    if stop_distance_at_entry is None:
+        return None, None
+    if stop_distance_at_entry <= 0:
+        return None, None
+    risk_amount = capital_before * float(config.risk_percent or 0.0)
+    if risk_amount <= 0:
+        return None, None
+    size = risk_amount / stop_distance_at_entry
+    if size <= 0:
+        return None, None
+    return size, risk_amount
 
 
 def _effective_stop(position: OpenPosition) -> tuple[float | None, str | None]:
@@ -493,7 +568,16 @@ def _update_trailing_stop(
             position.trailing_stop_price = min(position.trailing_stop_price, candidate)
 
 
-def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price: float, exit_reason: str, config: BacktestConfig, exit_bar_index: int) -> TradeRecord:
+def _finalize_trade(
+    position: OpenPosition,
+    exit_time: pd.Timestamp,
+    exit_price: float,
+    exit_reason: str,
+    config: BacktestConfig,
+    exit_bar_index: int,
+    *,
+    capital_after: float,
+) -> TradeRecord:
     gross_pnl, net_pnl = _compute_trade_pnl(position.side, position.entry_price, exit_price, position.size, config.fee_per_trade)
     outcome = "win" if net_pnl > 0 else "loss" if net_pnl < 0 else "breakeven"
     return TradeRecord(
@@ -512,6 +596,11 @@ def _finalize_trade(position: OpenPosition, exit_time: pd.Timestamp, exit_price:
         outcome=outcome,
         strategy_name=config.strategy_name,
         notes=None,
+        position_size_used=position.size,
+        capital_before=position.capital_before,
+        capital_after=capital_after,
+        risk_amount=position.risk_amount,
+        stop_distance_at_entry=position.stop_distance_at_entry,
         atr_at_entry=position.atr_at_entry,
         trailing_stop_initial=position.trailing_stop_initial,
         trailing_stop_final=position.trailing_stop_price,
@@ -585,7 +674,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
         preferred_column = None
         fallback_column = None
 
-    realized_equity = float(config.initial_capital)
+    realized_capital = float(config.initial_capital)
     equity_rows: list[dict[str, object]] = []
     trades: list[TradeRecord] = []
     position: OpenPosition | None = None
@@ -604,54 +693,91 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             wants_opposite = (position.side == "long" and signal_value < 0) or (position.side == "short" and signal_value > 0)
             if wants_opposite:
                 exit_price = _execution_price(position.side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=False)
-                trade = _finalize_trade(position, current_time, exit_price, "signal_exit", config, index)
+                _, net_pnl = _compute_trade_pnl(position.side, position.entry_price, exit_price, position.size, config.fee_per_trade)
+                capital_after = realized_capital + net_pnl
+                trade = _finalize_trade(
+                    position,
+                    current_time,
+                    exit_price,
+                    "signal_exit",
+                    config,
+                    index,
+                    capital_after=capital_after,
+                )
                 trades.append(trade)
-                realized_equity += float(trade.net_pnl or 0.0)
+                realized_capital = capital_after
                 position = None
 
         can_enter_long = signal_value > 0 and config.allow_long
         can_enter_short = signal_value < 0 and config.allow_short
         if position is None and (can_enter_long or can_enter_short):
+            capital_before = realized_capital
             atr_at_signal = None
             if atr_series is not None:
                 atr_at_signal = float(atr_series.iloc[index - 1]) if pd.notna(atr_series.iloc[index - 1]) else None
             ma_at_signal = _ma_stop_value(previous_signal_row, config) if preferred_column is not None else None
             if (not requires_atr_at_entry or atr_at_signal is not None) and (preferred_column is None or ma_at_signal is not None):
                 side = "long" if can_enter_long else "short"
-                trade_counter += 1
                 entry_price = _execution_price(side, float(current_bar["open"]), spread=config.spread, slippage=config.slippage, is_entry=True)
                 stop_loss, take_profit = _build_stop_take_profit(entry_price, side, config, atr_at_entry=atr_at_signal)
-                position = OpenPosition(
-                    trade_id=f"{config.strategy_name}_{trade_counter}",
-                    side=side,
-                    entry_time=current_time,
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    atr_at_entry=atr_at_signal,
-                    trailing_active=_has_trailing(config) and config.trailing_activation is None,
-                    trailing_stop_price=None,
-                    trailing_stop_initial=None,
-                    trailing_stop_reason=_trailing_reason(config),
-                    break_even_active=False,
-                    break_even_stop_price=None,
-                    ma_stop_price=None,
-                    ma_stop_initial=None,
-                    high_since_entry=float(current_bar["high"]),
-                    low_since_entry=float(current_bar["low"]),
-                    size=config.fixed_position_size,
-                    strategy_name=config.strategy_name,
-                    entry_bar_index=index,
+                initial_ma_stop = (
+                    _compute_ma_stop_from_value(side, ma_at_signal, config, atr_value=atr_at_signal)
+                    if config.position_sizing_mode == "risk_percent"
+                    else None
                 )
+                initial_stop = _initial_stop_price(side, stop_loss, initial_ma_stop)
+                stop_distance_at_entry = _stop_distance_at_entry(entry_price, initial_stop)
+                size, risk_amount = _position_size_and_risk(
+                    config=config,
+                    capital_before=capital_before,
+                    stop_distance_at_entry=stop_distance_at_entry,
+                )
+                if size is not None:
+                    trade_counter += 1
+                    position = OpenPosition(
+                        trade_id=f"{config.strategy_name}_{trade_counter}",
+                        side=side,
+                        entry_time=current_time,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        atr_at_entry=atr_at_signal,
+                        trailing_active=_has_trailing(config) and config.trailing_activation is None,
+                        trailing_stop_price=None,
+                        trailing_stop_initial=None,
+                        trailing_stop_reason=_trailing_reason(config),
+                        break_even_active=False,
+                        break_even_stop_price=None,
+                        ma_stop_price=initial_ma_stop,
+                        ma_stop_initial=initial_ma_stop,
+                        high_since_entry=float(current_bar["high"]),
+                        low_since_entry=float(current_bar["low"]),
+                        size=size,
+                        capital_before=capital_before,
+                        risk_amount=risk_amount,
+                        stop_distance_at_entry=stop_distance_at_entry,
+                        strategy_name=config.strategy_name,
+                        entry_bar_index=index,
+                    )
 
         if position is not None:
             intrabar_exit = _resolve_exit_from_bar(position, current_bar)
             if intrabar_exit is not None:
                 raw_exit_price, exit_reason = intrabar_exit
                 adjusted_exit = _execution_price(position.side, raw_exit_price, spread=config.spread, slippage=config.slippage, is_entry=False)
-                trade = _finalize_trade(position, current_time, adjusted_exit, exit_reason, config, index)
+                _, net_pnl = _compute_trade_pnl(position.side, position.entry_price, adjusted_exit, position.size, config.fee_per_trade)
+                capital_after = realized_capital + net_pnl
+                trade = _finalize_trade(
+                    position,
+                    current_time,
+                    adjusted_exit,
+                    exit_reason,
+                    config,
+                    index,
+                    capital_after=capital_after,
+                )
                 trades.append(trade)
-                realized_equity += float(trade.net_pnl or 0.0)
+                realized_capital = capital_after
                 position = None
             else:
                 _update_extrema(position, current_bar)
@@ -666,7 +792,7 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 )
                 _update_trailing_stop(position, current_bar, config, current_atr=current_atr, chandelier_atr=chandelier_atr)
 
-        mark_to_market = realized_equity
+        mark_to_market = realized_capital
         if position is not None:
             unrealized = (float(current_bar["close"]) - position.entry_price) * position.size if position.side == "long" else (position.entry_price - float(current_bar["close"])) * position.size
             mark_to_market += unrealized
@@ -675,7 +801,8 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
             {
                 "timestamp": current_time,
                 "equity": mark_to_market,
-                "realized_equity": realized_equity,
+                "capital": realized_capital,
+                "realized_equity": realized_capital,
                 "position_side": position.side if position is not None else "flat",
             }
         )
@@ -684,14 +811,25 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
         last_bar = candles_frame.iloc[-1]
         exit_price = _execution_price(position.side, float(last_bar["close"]), spread=config.spread, slippage=config.slippage, is_entry=False)
         final_timestamp = pd.Timestamp(last_bar["timestamp"])
-        trade = _finalize_trade(position, final_timestamp, exit_price, "forced_end", config, len(candles_frame) - 1)
+        _, net_pnl = _compute_trade_pnl(position.side, position.entry_price, exit_price, position.size, config.fee_per_trade)
+        capital_after = realized_capital + net_pnl
+        trade = _finalize_trade(
+            position,
+            final_timestamp,
+            exit_price,
+            "forced_end",
+            config,
+            len(candles_frame) - 1,
+            capital_after=capital_after,
+        )
         trades.append(trade)
-        realized_equity += float(trade.net_pnl or 0.0)
+        realized_capital = capital_after
         if equity_rows:
             equity_rows[-1] = {
                 "timestamp": final_timestamp,
-                "equity": realized_equity,
-                "realized_equity": realized_equity,
+                "equity": realized_capital,
+                "capital": realized_capital,
+                "realized_equity": realized_capital,
                 "position_side": "flat",
             }
 
@@ -714,6 +852,11 @@ def run_backtest(candles: pd.DataFrame, signals: pd.DataFrame, config: BacktestC
                 "outcome",
                 "strategy_name",
                 "notes",
+                "position_size_used",
+                "capital_before",
+                "capital_after",
+                "risk_amount",
+                "stop_distance_at_entry",
                 "atr_at_entry",
                 "trailing_stop_initial",
                 "trailing_stop_final",

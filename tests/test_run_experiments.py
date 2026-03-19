@@ -38,12 +38,27 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
         config["trailing_type_variant"] in {None, "standard", "chandelier"}
         for config in configs
     )
+    assert all(config["position_sizing_mode"] == "fixed" for config in configs)
 
 
 def test_experiment_hash_changes_when_version_changes() -> None:
     config = {"pair": "EURUSD", "timeframe": "1h", "ma_types": ["ema", "sma"], "ma_periods": [20, 50]}
 
     assert MODULE.experiment_hash(config, "v1") != MODULE.experiment_hash(config, "v2")
+
+
+def test_experiment_hash_changes_when_sizing_config_changes() -> None:
+    base = {
+        "pair": "EURUSD",
+        "timeframe": "1h",
+        "ma_types": ["ema", "sma"],
+        "ma_periods": [20, 50],
+        "position_sizing_mode": "fixed",
+        "risk_percent": None,
+    }
+    risk = {**base, "position_sizing_mode": "risk_percent", "risk_percent": 0.01}
+
+    assert MODULE.experiment_hash(base, "v1") != MODULE.experiment_hash(risk, "v1")
 
 
 def test_flush_result_buffer_writes_rows_to_dataset_directory(tmp_path: Path) -> None:
@@ -94,6 +109,43 @@ def test_resume_skips_preexisting_config_hashes(tmp_path: Path) -> None:
 
     assert len(pending) == len(configs) - 1
     assert all(config["config_hash"] != existing_hash for config in pending)
+
+
+def test_load_failed_hashes_reads_hashes_from_jsonl(tmp_path: Path) -> None:
+    failed_log_path = tmp_path / "failed_runs.jsonl"
+    failed_log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"config_hash": "hash-1", "error": "boom"}),
+                json.dumps({"config_hash": "hash-2", "error": "boom-2"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert MODULE.load_failed_hashes(failed_log_path) == {"hash-1", "hash-2"}
+
+
+def test_resume_can_skip_failed_hashes_from_log(tmp_path: Path) -> None:
+    failed_log_path = tmp_path / "failed_runs.jsonl"
+    configs = list(
+        MODULE.iter_experiment_configs(
+            pairs=["EURUSD"],
+            timeframes=["1h"],
+            exit_profiles=["none"],
+            start_date="2025-01-01",
+            end_date="2025-01-15",
+            experiment_version="v1",
+        )
+    )
+    failed_hash = configs[0]["config_hash"]
+    failed_log_path.write_text(json.dumps({"config_hash": failed_hash, "error": "boom"}), encoding="utf-8")
+
+    attempted_hashes = MODULE.load_failed_hashes(failed_log_path)
+    pending = [config for config in configs if config["config_hash"] not in attempted_hashes]
+
+    assert len(pending) == len(configs) - 1
+    assert all(config["config_hash"] != failed_hash for config in pending)
 
 
 def test_validate_metrics_file_rejects_missing_required_keys(tmp_path: Path) -> None:

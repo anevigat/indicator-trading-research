@@ -326,6 +326,16 @@ Execution assumptions:
 - when stop-loss, break-even, and trailing are all present, the effective stop for the bar is the tightest active stop
 - when MA stop is enabled, the effective stop is the tightest active stop among static stop-loss, break-even, trailing, chandelier trailing, and MA stop
 - if both stop-loss and take-profit are touched within the same bar, the engine assumes stop-loss triggers first
+- position sizing supports:
+  `fixed`
+  `risk_percent`
+- `fixed` preserves the existing normalized fixed-size behavior through `fixed_position_size`
+- `risk_percent` compounds capital by risking a fixed fraction of current capital on each new trade
+- v1 risk sizing uses the explicit simplified formula:
+  `position_size = (current_capital * risk_percent) / stop_distance_price`
+- this is intentionally not full broker-accurate FX pip-value conversion yet; it is price-unit sizing for capital-aware research
+- `risk_percent` mode requires a valid entry-time stop distance from `stop_loss` or from an MA stop that can be computed at entry
+- trailing activation, chandelier trailing, and later stop tightening are not enough by themselves to size the trade at entry
 
 Outputs are saved to:
 
@@ -338,6 +348,18 @@ Each run folder contains:
 - `trades.parquet`
 - `signals.parquet`
 - `equity_curve.parquet`
+
+`metrics.json` now includes capital-aware fields such as `final_capital`, `total_return_pct`, `max_drawdown_pct`, `average_risk_amount`, and `average_position_size_used`.
+
+`trades.parquet` includes the execution and capital fields needed for review:
+
+- `position_size_used`
+- `capital_before`
+- `capital_after`
+- `risk_amount`
+- `stop_distance_at_entry`
+
+`equity_curve.parquet` includes both mark-to-market `equity` and realized `capital`.
 
 Run a bounded SMA crossover backtest:
 
@@ -463,6 +485,31 @@ python scripts/run_backtest.py \
   --take-profit-mode atr \
   --atr-period 14 \
   --atr-method wilder \
+  --output-root outputs/backtests
+```
+
+Run the backtest in capital-aware `risk_percent` mode:
+
+```bash
+python scripts/run_backtest.py \
+  --data-root data/processed \
+  --pair EURUSD \
+  --timeframe 1h \
+  --strategy ma_strategy \
+  --start-date 2025-01-01 \
+  --end-date 2025-02-15 \
+  --ma-types sma,ema \
+  --ma-periods 25,50 \
+  --entry-type crossover_breakout \
+  --initial-capital 100 \
+  --position-sizing-mode risk_percent \
+  --risk-percent 0.01 \
+  --stop-loss 1.0 \
+  --stop-loss-mode atr \
+  --atr-period 14 \
+  --atr-method wilder \
+  --spread 0.0001 \
+  --slippage 0.00002 \
   --output-root outputs/backtests
 ```
 
@@ -764,7 +811,7 @@ Filters currently supported:
 
 If you pass `--print-only`, the script prints the shortlist and does not write files. If you omit `--output`, it also defaults to print-only behavior.
 
-The terminal output is intentionally compact: each row starts with a summary such as `EURUSD 1h crossover wma/sma 25/50 exit=none`, followed by a small metric set for fast review in the shell.
+The terminal output is intentionally compact: each row starts with a summary such as `EURUSD 1h crossover wma/sma 25/50 exit=none`, followed by a small metric set for fast review in the shell. When available, that compact view now includes `final_capital`.
 
 Print the top 20 rows without writing files:
 
