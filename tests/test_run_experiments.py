@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,10 +13,75 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "run_experiments.py"
+PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
 SPEC = importlib.util.spec_from_file_location("run_experiments_module", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def write_processed_candles(data_root: Path, pair: str, timeframe: str, periods: int = 260) -> None:
+    freq_map = {"1h": "1h", "4h": "4h"}
+    if timeframe not in freq_map:
+        raise ValueError(f"Unsupported test timeframe: {timeframe}")
+    timestamps = pd.date_range("2025-01-01", periods=periods, freq=freq_map[timeframe], tz="UTC")
+    closes = [
+        1.10
+        + 0.015 * math.sin(index / 8.0)
+        + 0.006 * math.cos(index / 17.0)
+        + 0.0001 * index
+        for index in range(periods)
+    ]
+    opens = [closes[0], *closes[:-1]]
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": opens,
+            "high": [value + 0.0015 for value in closes],
+            "low": [value - 0.0015 for value in closes],
+            "close": closes,
+            "pair": pair,
+            "timeframe": timeframe,
+            "spread": 0.0001,
+        }
+    )
+    parquet_path = data_root / pair / timeframe / f"{pair.lower()}_{timeframe.lower()}.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(parquet_path, index=False)
+
+
+def run_experiments_cli(
+    tmp_path: Path,
+    *,
+    data_root: Path,
+    output_path: Path,
+    failed_log_path: Path,
+    output_root: Path,
+    extra_args: list[str],
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(PYTHON_BIN),
+        str(SCRIPT_PATH),
+        "--data-root",
+        str(data_root),
+        "--output-path",
+        str(output_path),
+        "--failed-log-path",
+        str(failed_log_path),
+        "--output-root",
+        str(output_root),
+        *extra_args,
+    ]
+    env = os.environ.copy()
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed
 
 
 def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
@@ -21,7 +89,7 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
         MODULE.iter_experiment_configs(
             pairs=["EURUSD"],
             timeframes=["1h"],
-            exit_profiles=["none", "atr_trailing"],
+            exit_profiles=["fixed1010", "atr_trailing"],
             start_date="2025-01-01",
             end_date="2025-02-15",
             experiment_version="v1",
@@ -38,7 +106,10 @@ def test_iter_experiment_configs_excludes_invalid_three_ma_crossover() -> None:
         config["trailing_type_variant"] in {None, "standard", "chandelier"}
         for config in configs
     )
-    assert all(config["position_sizing_mode"] == "fixed" for config in configs)
+    assert all(
+        config["position_sizing_mode"] == MODULE.DEFAULT_BACKTEST_SETTINGS["position_sizing_mode"]
+        for config in configs
+    )
 
 
 def test_group_experiments_by_slice_preserves_order_and_hashes() -> None:
@@ -46,7 +117,7 @@ def test_group_experiments_by_slice_preserves_order_and_hashes() -> None:
         MODULE.iter_experiment_configs(
             pairs=["USDJPY", "EURUSD"],
             timeframes=["4h", "1h"],
-            exit_profiles=["none"],
+            exit_profiles=["fixed1010"],
             start_date="2025-01-01",
             end_date="2025-02-15",
             experiment_version="v1",
@@ -117,7 +188,7 @@ def test_resume_skips_preexisting_config_hashes(tmp_path: Path) -> None:
         MODULE.iter_experiment_configs(
             pairs=["EURUSD"],
             timeframes=["1h"],
-            exit_profiles=["none"],
+            exit_profiles=["fixed1010"],
             start_date="2025-01-01",
             end_date="2025-01-15",
             experiment_version="v1",
@@ -190,7 +261,7 @@ def test_resume_can_skip_failed_hashes_from_log(tmp_path: Path) -> None:
         MODULE.iter_experiment_configs(
             pairs=["EURUSD"],
             timeframes=["1h"],
-            exit_profiles=["none"],
+            exit_profiles=["fixed1010"],
             start_date="2025-01-01",
             end_date="2025-01-15",
             experiment_version="v1",
@@ -237,6 +308,7 @@ def test_append_failed_run_writes_timestamp_and_config(tmp_path: Path) -> None:
 def test_normalize_selection_supports_case_insensitive_pairs_and_exact_timeframes() -> None:
     assert MODULE.normalize_selection(["eurusd", "USDJPY"], MODULE.PAIRS) == ["EURUSD", "USDJPY"]
     assert MODULE.normalize_selection(["1h", "4h"], MODULE.TIMEFRAMES) == ["1h", "4h"]
+    assert MODULE.normalize_selection(["EURUSD,GBPUSD"], MODULE.PAIRS) == ["EURUSD", "GBPUSD"]
 
 
 def test_parse_args_defaults_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,6 +327,7 @@ def test_parse_args_defaults_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
     args = MODULE.parse_args()
 
     assert args.data_root == "data/processed"
+    assert args.workers == 1
 
 
 def test_flatten_result_keeps_expected_schema_columns() -> None:
@@ -303,3 +376,174 @@ def test_flatten_result_keeps_expected_schema_columns() -> None:
     )
 
     assert set(MODULE.RESULT_COLUMNS).issubset(row.keys())
+
+
+def test_workers_one_and_two_produce_same_schema_and_hashes(tmp_path: Path) -> None:
+    data_root = tmp_path / "data" / "processed"
+    write_processed_candles(data_root, "EURUSD", "1h")
+
+    single_output = tmp_path / "single.parquet"
+    single_failed = tmp_path / "single_failed.jsonl"
+    single_runs = tmp_path / "single_backtests"
+    single = run_experiments_cli(
+        tmp_path,
+        data_root=data_root,
+        output_path=single_output,
+        failed_log_path=single_failed,
+        output_root=single_runs,
+        extra_args=[
+            "--pairs",
+            "EURUSD",
+            "--timeframes",
+            "1h",
+            "--exit-profiles",
+            "fixed1010",
+            "--start-date",
+            "2025-01-01",
+            "--end-date",
+            "2025-01-15",
+            "--max-runs",
+            "5",
+            "--flush-every",
+            "5",
+            "--workers",
+            "1",
+        ],
+    )
+
+    worker_output = tmp_path / "worker.parquet"
+    worker_failed = tmp_path / "worker_failed.jsonl"
+    worker_runs = tmp_path / "worker_backtests"
+    worker = run_experiments_cli(
+        tmp_path,
+        data_root=data_root,
+        output_path=worker_output,
+        failed_log_path=worker_failed,
+        output_root=worker_runs,
+        extra_args=[
+            "--pairs",
+            "EURUSD",
+            "--timeframes",
+            "1h",
+            "--exit-profiles",
+            "fixed1010",
+            "--start-date",
+            "2025-01-01",
+            "--end-date",
+            "2025-01-15",
+            "--max-runs",
+            "5",
+            "--flush-every",
+            "5",
+            "--workers",
+            "2",
+        ],
+    )
+
+    assert "workers=1" in single.stdout
+    assert "workers=2" in worker.stdout
+
+    single_frame = pd.read_parquet(single_output)
+    worker_frame = pd.read_parquet(worker_output)
+
+    assert set(single_frame.columns) == set(MODULE.RESULT_COLUMNS)
+    assert set(worker_frame.columns) == set(MODULE.RESULT_COLUMNS)
+    assert set(single_frame["config_hash"]) == set(worker_frame["config_hash"])
+    assert single_frame["config_hash"].is_unique
+    assert worker_frame["config_hash"].is_unique
+
+
+def test_worker_mode_resume_skips_completed_hashes(tmp_path: Path) -> None:
+    data_root = tmp_path / "data" / "processed"
+    write_processed_candles(data_root, "EURUSD", "1h")
+
+    output_path = tmp_path / "resume.parquet"
+    failed_log_path = tmp_path / "resume_failed.jsonl"
+    output_root = tmp_path / "resume_backtests"
+    common_args = [
+        "--pairs",
+        "EURUSD",
+        "--timeframes",
+        "1h",
+        "--exit-profiles",
+        "fixed1010",
+        "--start-date",
+        "2025-01-01",
+        "--end-date",
+        "2025-01-15",
+        "--max-runs",
+        "5",
+        "--flush-every",
+        "5",
+        "--workers",
+        "2",
+    ]
+
+    first = run_experiments_cli(
+        tmp_path,
+        data_root=data_root,
+        output_path=output_path,
+        failed_log_path=failed_log_path,
+        output_root=output_root,
+        extra_args=common_args,
+    )
+    first_frame = pd.read_parquet(output_path)
+    assert len(first_frame) == 5
+    assert "completed=0" in first.stdout
+
+    second = run_experiments_cli(
+        tmp_path,
+        data_root=data_root,
+        output_path=output_path,
+        failed_log_path=failed_log_path,
+        output_root=output_root,
+        extra_args=common_args,
+    )
+    second_frame = pd.read_parquet(output_path)
+    assert len(second_frame) == 10
+    assert second_frame["config_hash"].nunique() == 10
+    assert "completed=5" in second.stdout
+
+
+def test_worker_mode_logs_failures_without_losing_successes(tmp_path: Path) -> None:
+    data_root = tmp_path / "data" / "processed"
+    write_processed_candles(data_root, "EURUSD", "1h")
+
+    output_path = tmp_path / "mixed.parquet"
+    failed_log_path = tmp_path / "mixed_failed.jsonl"
+    output_root = tmp_path / "mixed_backtests"
+    completed = run_experiments_cli(
+        tmp_path,
+        data_root=data_root,
+        output_path=output_path,
+        failed_log_path=failed_log_path,
+        output_root=output_root,
+        extra_args=[
+            "--pairs",
+            "EURUSD,GBPUSD",
+            "--timeframes",
+            "1h",
+            "--exit-profiles",
+            "fixed1010",
+            "--start-date",
+            "2025-01-01",
+            "--end-date",
+            "2025-01-15",
+            "--max-runs",
+            "100",
+            "--flush-every",
+            "10",
+            "--workers",
+            "2",
+        ],
+    )
+
+    result_frame = pd.read_parquet(output_path)
+    failure_lines = failed_log_path.read_text(encoding="utf-8").strip().splitlines()
+
+    assert len(result_frame) > 0
+    assert result_frame["config_hash"].is_unique
+    assert len(failure_lines) > 0
+    parsed_failure = json.loads(failure_lines[0])
+    assert {"config_hash", "config", "error", "timestamp", "slice"}.issubset(parsed_failure)
+    assert "GBPUSD" in completed.stdout

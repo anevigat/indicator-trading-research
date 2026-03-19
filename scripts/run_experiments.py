@@ -7,6 +7,7 @@ import argparse
 from collections import OrderedDict
 import hashlib
 import json
+import multiprocessing
 import shutil
 import sys
 import time
@@ -314,6 +315,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-runs", type=int, default=None, help="Optional cap on pending runs for smoke testing.")
     parser.add_argument("--flush-every", type=int, default=20, help="Number of successful rows to buffer before flushing.")
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of dataset-slice worker processes. Defaults to 1 for single-process execution.",
+    )
+    parser.add_argument(
         "--experiment-version",
         default=EXPERIMENT_VERSION,
         help="Version label included in config hashes for cache invalidation.",
@@ -326,8 +333,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def normalize_selection(values: list[str] | None, allowed: list[str]) -> list[str]:
+def _expand_selection_values(values: list[str] | None) -> list[str]:
     if not values:
+        return []
+    expanded: list[str] = []
+    for value in values:
+        parts = [part.strip() for part in value.split(",")]
+        expanded.extend(part for part in parts if part)
+    return expanded
+
+
+def normalize_selection(values: list[str] | None, allowed: list[str]) -> list[str]:
+    expanded_values = _expand_selection_values(values)
+    if not expanded_values:
         return allowed[:]
     allowed_map: dict[str, str] = {}
     for allowed_value in allowed:
@@ -335,7 +353,7 @@ def normalize_selection(values: list[str] | None, allowed: list[str]) -> list[st
         allowed_map[allowed_value.upper()] = allowed_value
         allowed_map[allowed_value.lower()] = allowed_value
     normalized: list[str] = []
-    for value in values:
+    for value in expanded_values:
         if value in allowed_map:
             normalized.append(allowed_map[value])
             continue
@@ -811,6 +829,220 @@ def experiment_summary(experiment: dict[str, Any]) -> str:
     )
 
 
+def slice_summary(slice_key: tuple[str, str, str, str]) -> str:
+    pair, timeframe, start_date, end_date = slice_key
+    return f"{pair} {timeframe} {start_date}..{end_date}"
+
+
+def _failure_payload(
+    *,
+    experiment: dict[str, Any],
+    error: str,
+    traceback_text: str,
+    slice_key: tuple[str, str, str, str],
+) -> dict[str, Any]:
+    pair, timeframe, start_date, end_date = slice_key
+    return {
+        "config_hash": experiment["config_hash"],
+        "config": experiment,
+        "error": error,
+        "timestamp": now_iso(),
+        "traceback": traceback_text,
+        "slice": {
+            "pair": pair,
+            "timeframe": timeframe,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    }
+
+
+def run_slice_worker(
+    work_item: tuple[tuple[str, str, str, str], list[dict[str, Any]], str, str],
+) -> dict[str, Any]:
+    slice_key, slice_experiments, data_root_str, output_root_str = work_item
+    pair, timeframe, start_date, end_date = slice_key
+    slice_started = time.time()
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    load_duration = 0.0
+    cache_duration = 0.0
+    run_duration_total = 0.0
+
+    try:
+        load_started = time.time()
+        current_candles = load_backtest_candles(
+            data_root=data_root_str,
+            pair=pair,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        load_duration = time.time() - load_started
+
+        cache_started = time.time()
+        strategies = build_strategy_cache(slice_experiments)
+        required_ma_keys = collect_required_ma_keys(strategies)
+        ma_cache = build_ma_cache(current_candles, required_ma_keys)
+        cache_duration = time.time() - cache_started
+
+        for experiment in slice_experiments:
+            run_started_epoch = time.time()
+            run_started_at = now_iso()
+            try:
+                strategy = strategies[strategy_cache_key(experiment)]
+                signals = strategy.generate_signals(current_candles, indicator_cache=ma_cache)
+                config = build_backtest_config(experiment)
+                result = run_backtest(current_candles, signals, config)
+                run_dir = save_backtest_result(result, output_root_str)
+                run_duration = time.time() - run_started_epoch
+                metrics = validate_metrics_file(run_dir)
+                rows.append(
+                    flatten_result(
+                        experiment,
+                        metrics,
+                        run_dir,
+                        run_started_at=run_started_at,
+                        run_duration_sec=run_duration,
+                    )
+                )
+                run_duration_total += run_duration
+            except Exception as exc:
+                failures.append(
+                    _failure_payload(
+                        experiment=experiment,
+                        error=str(exc),
+                        traceback_text=traceback.format_exc(),
+                        slice_key=slice_key,
+                    )
+                )
+    except Exception as exc:
+        error_text = f"slice worker failed for {slice_summary(slice_key)}: {exc}"
+        traceback_text = traceback.format_exc()
+        for experiment in slice_experiments:
+            failures.append(
+                _failure_payload(
+                    experiment=experiment,
+                    error=error_text,
+                    traceback_text=traceback_text,
+                    slice_key=slice_key,
+                )
+            )
+
+    total_duration = time.time() - slice_started
+    average_run_duration = run_duration_total / len(slice_experiments) if slice_experiments else 0.0
+    return {
+        "slice_key": slice_key,
+        "config_count": len(slice_experiments),
+        "rows": rows,
+        "failures": failures,
+        "load_duration_sec": load_duration,
+        "ma_cache_duration_sec": cache_duration,
+        "run_duration_sec": run_duration_total,
+        "slice_duration_sec": total_duration,
+        "average_run_duration_sec": average_run_duration,
+    }
+
+
+def handle_completed_slice(
+    *,
+    payload: dict[str, Any],
+    failed_log_path: Path,
+    result_buffer: list[dict[str, Any]],
+    output_path: Path,
+    part_index: int,
+    flush_every: int,
+    slice_index: int,
+    total_slices: int,
+    completed_configs: int,
+    total_configs: int,
+) -> tuple[int, int]:
+    for failure in payload["failures"]:
+        append_failed_run(failed_log_path, failure)
+    result_buffer.extend(payload["rows"])
+    if len(result_buffer) >= flush_every:
+        part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
+
+    print(
+        f"Slice complete [{slice_index}/{total_slices}] {slice_summary(payload['slice_key'])} "
+        f"configs={payload['config_count']} processed={completed_configs}/{total_configs} "
+        f"success={len(payload['rows'])} failed={len(payload['failures'])} "
+        f"load_sec={payload['load_duration_sec']:.3f} "
+        f"ma_cache_sec={payload['ma_cache_duration_sec']:.3f} "
+        f"avg_run_sec={payload['average_run_duration_sec']:.3f} "
+        f"slice_sec={payload['slice_duration_sec']:.3f}"
+    )
+    return part_index, completed_configs
+
+
+def run_pending_slices(
+    *,
+    pending_slices: list[tuple[tuple[str, str, str, str], list[dict[str, Any]]]],
+    data_root: Path,
+    output_root: Path,
+    failed_log_path: Path,
+    output_path: Path,
+    part_index: int,
+    flush_every: int,
+    workers: int,
+) -> int:
+    result_buffer: list[dict[str, Any]] = []
+    total_configs = sum(len(slice_experiments) for _, slice_experiments in pending_slices)
+    completed_configs = 0
+    completed_slices = 0
+
+    try:
+        if workers == 1:
+            for slice_key, slice_experiments in pending_slices:
+                print(f"Slice start [{completed_slices + 1}/{len(pending_slices)}] {slice_summary(slice_key)} runs={len(slice_experiments)}")
+                payload = run_slice_worker((slice_key, slice_experiments, str(data_root), str(output_root)))
+                completed_slices += 1
+                completed_configs += payload["config_count"]
+                part_index, _ = handle_completed_slice(
+                    payload=payload,
+                    failed_log_path=failed_log_path,
+                    result_buffer=result_buffer,
+                    output_path=output_path,
+                    part_index=part_index,
+                    flush_every=flush_every,
+                    slice_index=completed_slices,
+                    total_slices=len(pending_slices),
+                    completed_configs=completed_configs,
+                    total_configs=total_configs,
+                )
+        else:
+            start_method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+            mp_context = multiprocessing.get_context(start_method)
+            work_items = [
+                (slice_key, slice_experiments, str(data_root), str(output_root))
+                for slice_key, slice_experiments in pending_slices
+            ]
+            with mp_context.Pool(processes=workers) as pool:
+                for payload in pool.imap_unordered(run_slice_worker, work_items):
+                    completed_slices += 1
+                    completed_configs += payload["config_count"]
+                    part_index, _ = handle_completed_slice(
+                        payload=payload,
+                        failed_log_path=failed_log_path,
+                        result_buffer=result_buffer,
+                        output_path=output_path,
+                        part_index=part_index,
+                        flush_every=flush_every,
+                        slice_index=completed_slices,
+                        total_slices=len(pending_slices),
+                        completed_configs=completed_configs,
+                        total_configs=total_configs,
+                    )
+    except KeyboardInterrupt:
+        if result_buffer:
+            part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
+        raise
+
+    if result_buffer:
+        part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
+    return part_index
+
+
 def main() -> None:
     args = parse_args()
     output_path = Path(args.output_path).expanduser().resolve()
@@ -820,6 +1052,8 @@ def main() -> None:
 
     if args.flush_every <= 0:
         raise ValueError("--flush-every must be positive.")
+    if args.workers <= 0:
+        raise ValueError("--workers must be positive.")
 
     pairs = normalize_selection(args.pairs, PAIRS)
     timeframes = normalize_selection(args.timeframes, TIMEFRAMES)
@@ -846,99 +1080,31 @@ def main() -> None:
     if args.max_runs is not None:
         pending = pending[: args.max_runs]
 
+    pending_slices = group_experiments_by_slice(pending)
     print(
         f"Experiment matrix: total={len(experiments)} completed={len(completed_hashes)} failed={len(failed_hashes)} pending={len(pending)} "
-        f"output={output_path} version={args.experiment_version}"
+        f"slices={len(pending_slices)} workers={args.workers} output={output_path} version={args.experiment_version}"
     )
     if not pending:
         print("No pending experiment configs. Resume is already up to date.")
         return
 
-    result_buffer: list[dict[str, Any]] = []
     part_index = next_part_index(output_path)
-    pending_slices = group_experiments_by_slice(pending)
 
     try:
-        completed_runs = 0
-        for slice_index, (slice_key, slice_experiments) in enumerate(pending_slices, start=1):
-            pair, timeframe, start_date, end_date = slice_key
-            print(
-                f"Slice [{slice_index}/{len(pending_slices)}] "
-                f"{pair} {timeframe} {start_date}..{end_date} runs={len(slice_experiments)}"
-            )
-
-            load_started = time.time()
-            current_candles = load_backtest_candles(
-                data_root=data_root,
-                pair=pair,
-                timeframe=timeframe,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            load_duration = time.time() - load_started
-
-            strategy_started = time.time()
-            strategies = build_strategy_cache(slice_experiments)
-            required_ma_keys = collect_required_ma_keys(strategies)
-            ma_cache = build_ma_cache(current_candles, required_ma_keys)
-            cache_duration = time.time() - strategy_started
-            print(
-                f"  loaded candles rows={len(current_candles)} load_sec={load_duration:.3f} "
-                f"ma_series={len(ma_cache)} ma_cache_sec={cache_duration:.3f}"
-            )
-
-            slice_run_duration = 0.0
-            for experiment in slice_experiments:
-                completed_runs += 1
-                print(f"[{completed_runs}/{len(pending)}] {experiment_summary(experiment)}")
-                run_started_epoch = time.time()
-                run_started_at = now_iso()
-                try:
-                    strategy = strategies[strategy_cache_key(experiment)]
-                    signals = strategy.generate_signals(current_candles, indicator_cache=ma_cache)
-                    config = build_backtest_config(experiment)
-                    result = run_backtest(current_candles, signals, config)
-                    run_dir = save_backtest_result(result, output_root)
-                    run_duration = time.time() - run_started_epoch
-                    metrics = validate_metrics_file(run_dir)
-                    row = flatten_result(
-                        experiment,
-                        metrics,
-                        run_dir,
-                        run_started_at=run_started_at,
-                        run_duration_sec=run_duration,
-                    )
-                    result_buffer.append(row)
-                    completed_hashes.add(experiment["config_hash"])
-                    slice_run_duration += run_duration
-                    if len(result_buffer) >= args.flush_every:
-                        part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
-                except Exception as exc:
-                    append_failed_run(
-                        failed_log_path,
-                        {
-                            "config_hash": experiment["config_hash"],
-                            "config": experiment,
-                            "error": str(exc),
-                            "timestamp": now_iso(),
-                            "traceback": traceback.format_exc(),
-                        },
-                    )
-                    print(f"  failed: {exc}")
-
-            average_run_duration = slice_run_duration / len(slice_experiments) if slice_experiments else 0.0
-            print(
-                f"  slice complete runs={len(slice_experiments)} "
-                f"avg_run_sec={average_run_duration:.3f} total_run_sec={slice_run_duration:.3f}"
-            )
+        part_index = run_pending_slices(
+            pending_slices=pending_slices,
+            data_root=data_root,
+            output_root=output_root,
+            failed_log_path=failed_log_path,
+            output_path=output_path,
+            part_index=part_index,
+            flush_every=args.flush_every,
+            workers=args.workers,
+        )
     except KeyboardInterrupt:
-        if result_buffer:
-            part_index = flush_result_buffer(output_path, result_buffer, part_index=part_index)
-        print("Interrupted. Flushed buffered rows before exit.")
+        print("Interrupted. Any completed slice results already received by the parent were flushed before exit.")
         raise SystemExit(130)
-
-    if result_buffer:
-        flush_result_buffer(output_path, result_buffer, part_index=part_index)
 
 
 if __name__ == "__main__":
