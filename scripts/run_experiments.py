@@ -71,7 +71,7 @@ ENTRY_TYPES_2 = ["crossover", "crossover_breakout", "price_above_all"]
 ENTRY_TYPES_3 = ["crossover", "crossover_breakout", "price_above_all"]
 
 EXIT_PROFILES = [
-    "none",
+    # "none",
     "fixed1010",
     "fixed1020",
     "fixed1030",
@@ -92,10 +92,14 @@ DEFAULT_BACKTEST_SETTINGS: dict[str, Any] = {
     "strategy": "ma_strategy",
     "start_date": "2019-01-01",
     "end_date": "2025-12-31",
-    "initial_capital": 10_000.0,
+    "initial_capital": 100.0,
     "fixed_position_size": 1.0,
-    "position_sizing_mode": "fixed",
-    "risk_percent": None,
+    "position_sizing_mode": "risk_percent",
+    "risk_percent": 0.01,
+    # "initial_capital": 10_000.0,
+    # "fixed_position_size": 1.0,
+    # "position_sizing_mode": "fixed",
+    # "risk_percent": None,
     "account_currency": "USD",
     "spread": 0.0001,
     "slippage": 0.00002,
