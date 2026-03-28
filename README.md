@@ -738,6 +738,10 @@ Production-mode behavior:
 - resume loads only `config_hash` values from the existing dataset and skips completed configs automatically
 - Phase P1 remains single-process, but now groups execution by dataset slice so each `(pair, timeframe, date window)` candle set is loaded once per slice
 - Phase P1 also precomputes and reuses MA series (`sma`, `ema`, `wma`, `hma`) within a dataset slice instead of recomputing the same indicators for each nearby config
+- Phase P2 adds optional process-based parallelism via `--workers`, but parallelism is still by dataset slice rather than by individual config
+- parquet writes and `failed_runs.jsonl` writes remain centralized in the parent process for safety; worker processes only run slice backtests and return rows/failures
+- start conservatively on laptops: `--workers 2` is a reasonable first step, and `--workers 4` should be treated as an upper bound only if memory headroom is clearly available
+- each worker loads its own slice candles and indicator cache, so increasing workers also increases memory usage
 
 Output schema includes:
 
@@ -790,6 +794,24 @@ python scripts/run_experiments.py \
 ```
 
 The second run will skip hashes already saved in the parquet dataset and continue with the next pending configs rather than rerunning completed ones.
+
+Run slice-parallel workers on a bounded subset:
+
+```bash
+python scripts/run_experiments.py \
+  --data-root data/processed \
+  --output-path outputs/experiments/ma_matrix.parquet \
+  --pairs EURUSD,GBPUSD \
+  --timeframes 1h,4h \
+  --exit-profiles fixed1010 \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-15 \
+  --max-runs 120 \
+  --flush-every 10 \
+  --workers 2
+```
+
+This keeps the runner single-host and process-based: the parent process owns resume checks and writes, while each worker handles one dataset slice at a time.
 
 If you intentionally change runner logic and want fresh hashes without deleting old results, override the experiment version:
 
